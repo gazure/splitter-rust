@@ -13,12 +13,12 @@ license = "Apache-2.0"
 repository = "https://github.com/atoms-co/splitter-rust"
 
 [workspace.dependencies]
-prost = "0.14.3"
-prost-types = "0.14.3"
-tonic = "0.14.5"
-tonic-build = "0.14.5"
-tonic-prost = "0.14.5"
-tonic-prost-build = "0.14.5"
+prost = "0.14.4"
+prost-types = "0.14.4"
+tonic = "0.14.6"
+tonic-build = "0.14.6"
+tonic-prost = "0.14.6"
+tonic-prost-build = "0.14.6"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = "0.7"
