@@ -251,11 +251,10 @@ fn update_grant(map: &mut ClusterMap, g: cluster_message::GrantInfo) -> Result<(
 }
 
 fn drop_grant(map: &mut ClusterMap, gid: &GrantId) {
-    if let Some(entry) = map.grants.remove(gid) {
-        if let Some(c) = map.consumers.get_mut(&entry.consumer) {
+    if let Some(entry) = map.grants.remove(gid)
+        && let Some(c) = map.consumers.get_mut(&entry.consumer) {
             c.grants.retain(|g| g != gid);
         }
-    }
 }
 
 fn remove_consumer(map: &mut ClusterMap, cid: &ConsumerId) {
