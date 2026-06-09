@@ -1,0 +1,17 @@
+[package]
+name = "splitter-peer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Thin harness for hosting a peer gRPC server alongside a splitter consumer."
+
+[dependencies]
+tonic = { workspace = true, features = ["server", "transport"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "sync", "macros"] }
+tokio-stream = { workspace = true, features = ["net"] }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "sync", "macros", "test-util"] }

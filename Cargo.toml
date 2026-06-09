@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "splitter-proto",
+    "splitter-client",
+    "splitter-peer",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/atoms-co/splitter-rust"
+
+[workspace.dependencies]
+prost = "0.14.3"
+prost-types = "0.14.3"
+tonic = "0.14.5"
+tonic-build = "0.14.5"
+tonic-prost = "0.14.5"
+tonic-prost-build = "0.14.5"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = "0.7"
+futures = "0.3"
+async-trait = "0.1"
+thiserror = "2.0.18"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }

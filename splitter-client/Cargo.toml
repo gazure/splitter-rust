@@ -1,0 +1,30 @@
+[package]
+name = "splitter-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rust client library for the splitter work-distribution service (data plane)."
+
+[dependencies]
+splitter-proto = { path = "../splitter-proto" }
+prost = { workspace = true }
+prost-types = { workspace = true }
+tonic = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal", "test-util"] }
+tracing-subscriber = { workspace = true }
+splitter-peer = { path = "../splitter-peer" }
+
+[[example]]
+name = "join"
+path = "examples/join.rs"
