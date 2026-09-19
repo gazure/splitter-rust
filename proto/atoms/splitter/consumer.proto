@@ -1,3 +1,4 @@
+// Modified for splitter-rust: references the vendored session package name.
 syntax = "proto3";
 
 package atoms.splitter;
