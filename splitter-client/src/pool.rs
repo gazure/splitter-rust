@@ -112,7 +112,7 @@ impl ConnectionPool {
         }
 
         let mut entries = self.entries.write().expect("pool poisoned");
-        for (id, endpoint) in to_add.into_iter().chain(to_rebuild.into_iter()) {
+        for (id, endpoint) in to_add.into_iter().chain(to_rebuild) {
             match (self.dial)(&endpoint) {
                 Ok(channel) => {
                     entries.insert(id, PoolEntry { endpoint, channel });
