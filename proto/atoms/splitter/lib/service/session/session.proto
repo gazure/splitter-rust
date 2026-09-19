@@ -1,3 +1,5 @@
+// splitter-rust vendored variant: uses atoms.splitter.lib.service.service
+// instead of the current upstream atoms.splitter.lib.service.session package.
 syntax = "proto3";
 
 package atoms.splitter.lib.service.service;

@@ -1,0 +1,12 @@
+The original Rust code in splitter-rust is licensed under the MIT License
+in LICENSE.
+
+The protobuf definitions under proto/atoms/splitter/ come from atoms-co/splitter:
+https://github.com/atoms-co/splitter
+
+Those definitions remain licensed under Apache License 2.0, reproduced in
+proto/LICENSE. This also applies to the bindings generated from those definitions
+by splitter-proto. The MIT license does not replace these upstream terms.
+
+splitter-proto contains MIT-licensed Rust code and Apache-2.0-licensed generated
+bindings, so its Cargo license expression is MIT AND Apache-2.0.
