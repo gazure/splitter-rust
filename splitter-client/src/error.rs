@@ -29,6 +29,9 @@ pub enum ClientError {
     SessionClosed(String),
     #[error("dispatcher drain timed out")]
     DrainTimeout,
+    /// The ownership retry budget elapsed before an attempt completed.
+    #[error("ownership retry deadline elapsed")]
+    RetryTimeout,
     #[error("cancelled")]
     Cancelled,
     #[error("invalid message: {0}")]
@@ -49,6 +52,9 @@ impl ClientError {
             ClientError::NoResolution => Status::unavailable("no resolution"),
             ClientError::Revoked => Status::aborted("revoked"),
             ClientError::DrainTimeout => Status::deadline_exceeded("dispatcher drain timed out"),
+            ClientError::RetryTimeout => {
+                Status::deadline_exceeded("ownership retry deadline elapsed")
+            }
             ClientError::Expired => Status::deadline_exceeded("expired"),
             ClientError::SessionClosed(msg) => Status::unavailable(msg),
             ClientError::Cancelled => Status::cancelled("cancelled"),
