@@ -260,6 +260,7 @@ struct GrantAction {
 struct Driver {
     transport: Transport,
     cluster: watch::Sender<Arc<ClusterMap>>,
+    cluster_needs_snapshot: bool,
     grants_tx: broadcast::Sender<GrantEvent>,
     assignments: watch::Sender<AssignmentSnapshot>,
     closed: Latch,
@@ -299,6 +300,7 @@ impl Driver {
             Self {
                 transport,
                 cluster,
+                cluster_needs_snapshot: true,
                 grants_tx,
                 assignments,
                 closed,
@@ -353,6 +355,9 @@ impl Driver {
                     self.recover(draining, ClientError::Transport(status))
                         .await?
                 }
+                Err(error @ ClientError::InvalidCluster(_)) => {
+                    self.recover_cluster(draining, error).await?
+                }
                 Err(error) => return Err(error),
             };
             // Convert the absolute server TTL once. A monotonic deadline also
@@ -403,11 +408,58 @@ impl Driver {
         self.reconnect().await
     }
 
+    async fn recover_cluster(&mut self, draining: bool, error: ClientError) -> Result<SystemTime> {
+        let Some((options, _)) = &self.reconnect else {
+            return Err(error);
+        };
+        let budget = options.timeout;
+        let shutdown = self.shutdown.clone();
+        let recovery = async {
+            let mut ttl = self.recover(draining, error).await?;
+            let mut heartbeat = heartbeat_timer(Some(ttl));
+            let mut deadline = tokio::time::Instant::now()
+                + ttl.duration_since(SystemTime::now()).unwrap_or_default();
+            let mut draining = false;
+            while self.cluster_needs_snapshot {
+                let progress =
+                    tokio::time::timeout_at(deadline, self.step(&mut heartbeat, &mut draining))
+                        .await
+                        .map_err(|_| {
+                            ClientError::SessionClosed(
+                                "session expired while awaiting cluster snapshot".into(),
+                            )
+                        })??;
+                match progress {
+                    SessionProgress::Renew(next) => {
+                        ttl = next;
+                        deadline = tokio::time::Instant::now()
+                            + ttl.duration_since(SystemTime::now()).unwrap_or_default();
+                        heartbeat = heartbeat_timer(Some(ttl));
+                    }
+                    SessionProgress::Continue => {}
+                    _ => {
+                        return Err(ClientError::SessionClosed(
+                            "session ended before cluster snapshot".into(),
+                        ));
+                    }
+                }
+            }
+            Ok(ttl)
+        };
+        tokio::select! {
+            biased;
+            _ = shutdown.closed() => Err(ClientError::Cancelled),
+            result = tokio::time::timeout(budget, recovery) => result
+                .map_err(|_| ClientError::SessionClosed("cluster recovery timeout".into()))?,
+        }
+    }
+
     async fn reconnect(&mut self) -> Result<SystemTime> {
         let (options, connect) = self.reconnect.clone().expect("reconnect configured");
         for grant in self.grants.values_mut() {
             grant.confirmed = false;
         }
+        self.cluster_needs_snapshot = true;
         // Keep peer routes so partial restart snapshots can reconcile existing grants.
         let attempt = async {
             loop {
@@ -494,12 +546,22 @@ impl Driver {
             },
             join_message::Msg::Consumer(ConsumerMessage { msg: Some(sub) }) => match sub {
                 consumer_message::Msg::Cluster(cm) => {
+                    let snapshot = matches!(cm.msg, Some(pb::cluster_message::Msg::Snapshot(_)));
+                    if self.cluster_needs_snapshot && !snapshot {
+                        return Err(ClientError::InvalidCluster(
+                            "expected a fresh cluster snapshot".into(),
+                        ));
+                    }
                     let current = self.cluster.borrow().clone();
                     match current.apply(cm) {
                         Ok(next) => {
-                            let _ = self.cluster.send(Arc::new(next));
+                            self.cluster_needs_snapshot = false;
+                            self.cluster.send_replace(Arc::new(next));
                         }
-                        Err(e) => warn!(error = %e, "failed to apply cluster update"),
+                        Err(error) => {
+                            self.cluster_needs_snapshot = true;
+                            return Err(ClientError::InvalidCluster(error.to_string()));
+                        }
                     }
                     Ok(None)
                 }

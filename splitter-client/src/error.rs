@@ -36,6 +36,9 @@ pub enum ClientError {
     Cancelled,
     #[error("invalid message: {0}")]
     InvalidMessage(String),
+    /// A cluster update failed validation; the session needs a fresh snapshot.
+    #[error("invalid cluster update: {0}")]
+    InvalidCluster(String),
     #[error("transport: {0}")]
     Transport(#[from] Status),
     #[error("transport setup: {0}")]
@@ -59,6 +62,7 @@ impl ClientError {
             ClientError::SessionClosed(msg) => Status::unavailable(msg),
             ClientError::Cancelled => Status::cancelled("cancelled"),
             ClientError::InvalidMessage(m) => Status::invalid_argument(m),
+            ClientError::InvalidCluster(m) => Status::data_loss(m),
             ClientError::Transport(s) => s,
             ClientError::TransportSetup(e) => Status::unavailable(e.to_string()),
         }

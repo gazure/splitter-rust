@@ -191,16 +191,14 @@ mod tests {
                 },
             );
         }
-        ClusterMap {
-            id: ClusterId {
-                version: 1,
-                origin: None,
-                timestamp: SystemTime::UNIX_EPOCH,
-            },
-            consumers: map,
-            grants: std::collections::HashMap::new(),
-            shards: Vec::new(),
-        }
+        let mut cluster = ClusterMap::empty();
+        cluster.id = ClusterId {
+            version: 1,
+            origin: None,
+            timestamp: SystemTime::UNIX_EPOCH,
+        };
+        cluster.consumers = map;
+        cluster
     }
 
     #[test]

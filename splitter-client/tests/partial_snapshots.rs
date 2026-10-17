@@ -6,6 +6,9 @@ use splitter_client::{
 };
 use splitter_proto::pb::{self, ClusterMessage, cluster_message as cm};
 
+#[path = "partial_snapshots/validation.rs"]
+mod validation;
+
 fn consumer(name: &str) -> Instance {
     Instance {
         id: InstanceId::new(),
@@ -57,8 +60,8 @@ fn snapshot(
         version: old.id.version + 1,
         msg: Some(cm::Msg::Snapshot(cm::Snapshot {
             shards: shards.to_vec(),
+            origin: Some(consumer("coordinator").into()),
             assignments,
-            ..Default::default()
         })),
         ..Default::default()
     })
@@ -67,6 +70,7 @@ fn snapshot(
 
 fn change(old: &ClusterMap, change: cm::Change) -> ClusterMap {
     old.apply(ClusterMessage {
+        id: old.id.origin.as_ref().unwrap().id.to_string(),
         version: old.id.version + 1,
         msg: Some(cm::Msg::Change(change)),
         ..Default::default()

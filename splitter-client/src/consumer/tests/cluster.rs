@@ -17,6 +17,7 @@ fn snapshot(assignment: bool) -> JoinMessage {
             msg: Some(consumer_message::Msg::Cluster(pb::ClusterMessage {
                 version: if assignment { 1 } else { 2 },
                 msg: Some(cm::Msg::Snapshot(cm::Snapshot {
+                    origin: Some(consumer.clone().into()),
                     shards: vec![shard.clone()],
                     assignments: if assignment {
                         vec![cm::Assignment {
@@ -30,7 +31,6 @@ fn snapshot(assignment: bool) -> JoinMessage {
                     } else {
                         vec![]
                     },
-                    ..Default::default()
                 })),
                 ..Default::default()
             })),
@@ -131,4 +131,136 @@ async fn failed_recovery_clears_retained_routes() {
     assert!(h.handle.closed().is_closed());
     assert!(h.handle.cluster.borrow().grants.is_empty());
     assert!(h.handle.cluster.borrow().consumers.is_empty());
+}
+
+fn incremental(cluster: &ClusterMap, version: i64) -> JoinMessage {
+    JoinMessage {
+        msg: Some(join_message::Msg::Consumer(ConsumerMessage {
+            msg: Some(consumer_message::Msg::Cluster(pb::ClusterMessage {
+                id: cluster.id.origin.as_ref().unwrap().id.to_string(),
+                version,
+                msg: Some(cm::Msg::Change(cm::Change::default())),
+                ..Default::default()
+            })),
+        })),
+    }
+}
+
+#[tokio::test]
+async fn invalid_cluster_update_preserves_map_and_requires_snapshot() {
+    let mut h = Harness::new();
+    h.driver.handle_inbound(snapshot(true)).await.unwrap();
+    let previous = h.handle.cluster.borrow().clone();
+    assert!(matches!(
+        h.driver.handle_inbound(incremental(&previous, 3)).await,
+        Err(ClientError::InvalidCluster(_))
+    ));
+    assert!(Arc::ptr_eq(&previous, &h.handle.cluster.borrow()));
+    // Even a correctly sequenced delta cannot repair a broken stream history.
+    assert!(matches!(
+        h.driver.handle_inbound(incremental(&previous, 2)).await,
+        Err(ClientError::InvalidCluster(_))
+    ));
+    h.driver.handle_inbound(snapshot(false)).await.unwrap();
+    let repaired = h.handle.cluster.borrow().clone();
+    h.driver
+        .handle_inbound(incremental(&repaired, 3))
+        .await
+        .unwrap();
+    assert_eq!(h.handle.cluster.borrow().id.version, 3);
+    assert_peer_route(&h.handle.cluster.borrow());
+}
+
+#[tokio::test(start_paused = true)]
+async fn invalid_cluster_update_reconnects_and_accepts_fresh_snapshot() {
+    let mut h = Harness::new();
+    h.driver.handle_inbound(snapshot(true)).await.unwrap();
+    let previous = h.handle.cluster.borrow().clone();
+    let (incoming, receiver) = mpsc::channel(8);
+    incoming.send(Ok(established())).await.unwrap();
+    incoming.send(Ok(snapshot(false))).await.unwrap();
+    let (outbound, _outgoing) = mpsc::channel(8);
+    let transport = Arc::new(std::sync::Mutex::new(Some(Transport {
+        outbound,
+        inbound: Box::pin(ReceiverStream::new(receiver)),
+    })));
+    h.driver.reconnect = Some((
+        ReconnectOptions {
+            timeout: Duration::from_secs(10),
+            backoff: Duration::from_secs(1),
+        },
+        Arc::new(move |_| {
+            let transport = transport
+                .lock()
+                .unwrap()
+                .take()
+                .expect("one recovery attempt");
+            Box::pin(async move { Ok(transport) })
+        }),
+    ));
+    h.inbound
+        .send(Ok(incremental(&previous, 99)))
+        .await
+        .unwrap();
+    h.handle.task = Some(tokio::spawn(h.driver.run()));
+    timeout(Duration::from_secs(5), async {
+        while h.handle.cluster.borrow().id.version != 2 {
+            h.handle.cluster.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_peer_route(&h.handle.cluster.borrow());
+    assert!(!h.handle.closed().is_closed());
+    h.handle.shutdown().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn invalid_cluster_update_without_recovery_closes_and_clears_routes() {
+    let mut h = Harness::new();
+    h.driver.handle_inbound(snapshot(true)).await.unwrap();
+    let previous = h.handle.cluster.borrow().clone();
+    h.inbound
+        .send(Ok(incremental(&previous, 99)))
+        .await
+        .unwrap();
+    assert!(matches!(
+        h.driver.run().await,
+        Err(ClientError::InvalidCluster(_))
+    ));
+    assert!(h.handle.closed().is_closed());
+    assert!(h.handle.cluster.borrow().grants.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn cluster_recovery_requires_snapshot_within_total_recovery_budget() {
+    let mut h = Harness::new();
+    h.driver.handle_inbound(snapshot(true)).await.unwrap();
+    let previous = h.handle.cluster.borrow().clone();
+    let (incoming, receiver) = mpsc::channel(8);
+    incoming.send(Ok(established())).await.unwrap();
+    let (outbound, _outgoing) = mpsc::channel(8);
+    let transport = Arc::new(std::sync::Mutex::new(Some(Transport {
+        outbound,
+        inbound: Box::pin(ReceiverStream::new(receiver)),
+    })));
+    h.driver.reconnect = Some((
+        ReconnectOptions {
+            timeout: Duration::from_secs(3),
+            backoff: Duration::from_secs(1),
+        },
+        Arc::new(move |_| {
+            let transport = transport.lock().unwrap().take().unwrap();
+            Box::pin(async move { Ok(transport) })
+        }),
+    ));
+    h.inbound
+        .send(Ok(incremental(&previous, 99)))
+        .await
+        .unwrap();
+    let start = tokio::time::Instant::now();
+    let error = h.driver.run().await.unwrap_err();
+    assert!(matches!(error, ClientError::SessionClosed(ref s) if s == "cluster recovery timeout"));
+    assert_eq!(start.elapsed(), Duration::from_secs(3));
+    assert!(h.handle.cluster.borrow().grants.is_empty());
 }
