@@ -12,8 +12,7 @@
 //! Every wrapper offers the same API — `new(impl Into<String>)`, `as_str()`,
 //! `From<&str>`/`From<String>`, `Display`, plus `Hash`/`Eq`/`Clone`.
 
-use std::fmt;
-use std::time::SystemTime;
+use std::{fmt, time::SystemTime};
 
 /// Shared interop impls for a `String`-backed newtype: `as_str`,
 /// `into_string`, `is_empty`, `Display`, `AsRef<str>`, `From<String>`,
@@ -23,9 +22,15 @@ use std::time::SystemTime;
 macro_rules! string_newtype_impls {
     ($name:ident) => {
         impl $name {
-            pub fn as_str(&self) -> &str { &self.0 }
-            pub fn into_string(self) -> String { self.0 }
-            pub fn is_empty(&self) -> bool { self.0.is_empty() }
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+            pub fn into_string(self) -> String {
+                self.0
+            }
+            pub fn is_empty(&self) -> bool {
+                self.0.is_empty()
+            }
         }
 
         impl fmt::Display for $name {
@@ -35,15 +40,21 @@ macro_rules! string_newtype_impls {
         }
 
         impl AsRef<str> for $name {
-            fn as_ref(&self) -> &str { &self.0 }
+            fn as_ref(&self) -> &str {
+                &self.0
+            }
         }
 
         impl From<String> for $name {
-            fn from(s: String) -> Self { Self(s) }
+            fn from(s: String) -> Self {
+                Self(s)
+            }
         }
 
         impl From<&str> for $name {
-            fn from(s: &str) -> Self { Self(s.to_string()) }
+            fn from(s: &str) -> Self {
+                Self(s.to_string())
+            }
         }
     };
 }
@@ -230,6 +241,15 @@ impl QualifiedServiceName {
             return None;
         }
         Some(Self::new(tenant, service))
+    }
+
+    /// Parse `tenant/service`
+    ///
+    /// # Panics
+    ///
+    /// if cannot parse
+    pub fn must_parse(s: &str) -> Self {
+        Self::parse(s).expect(&format!("Could not parse as service name: {}", s))
     }
 }
 

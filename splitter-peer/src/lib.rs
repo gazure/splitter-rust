@@ -29,12 +29,9 @@
 //! # Ok(()) }
 //! ```
 
-use std::io;
-use std::net::SocketAddr;
+use std::{io, net::SocketAddr};
 
-use tokio::net::TcpListener;
-use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
+use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::server::Router;
 

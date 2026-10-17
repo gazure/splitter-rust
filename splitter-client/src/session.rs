@@ -17,9 +17,11 @@
 
 use std::time::{Duration, SystemTime};
 
-use splitter_proto::location_pb;
-use splitter_proto::pb::{join_message, JoinMessage};
-use splitter_proto::session_pb;
+use splitter_proto::{
+    location_pb,
+    pb::{JoinMessage, join_message},
+    session_pb,
+};
 
 use crate::wrap::{now_timestamp, timestamp_to_system_time};
 

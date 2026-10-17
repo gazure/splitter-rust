@@ -4,8 +4,10 @@
 //! so readers can `.await` (via `Latch::closed`) and the fast path is a simple
 //! atomic load.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use tokio::sync::watch;
 

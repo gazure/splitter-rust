@@ -8,13 +8,14 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use prost_types::Timestamp;
-use splitter_proto::location_pb;
-use splitter_proto::pb;
+use splitter_proto::{location_pb, pb};
 
-use crate::error::ClientError;
-use crate::ids::{
-    DomainKey, DomainKeyName, DomainType, Endpoint, GrantState, Instance, InstanceId, Location,
-    QualifiedDomainKey, QualifiedDomainName, QualifiedServiceName, Shard,
+use crate::{
+    error::ClientError,
+    ids::{
+        DomainKey, DomainKeyName, DomainType, Endpoint, GrantState, Instance, InstanceId, Location,
+        QualifiedDomainKey, QualifiedDomainName, QualifiedServiceName, Shard,
+    },
 };
 
 fn required<T>(value: Option<T>, field: &'static str) -> Result<T, ClientError> {
@@ -33,7 +34,10 @@ pub fn system_time_to_timestamp(t: SystemTime) -> Timestamp {
             seconds: d.as_secs() as i64,
             nanos: d.subsec_nanos() as i32,
         },
-        Err(_) => Timestamp { seconds: 0, nanos: 0 },
+        Err(_) => Timestamp {
+            seconds: 0,
+            nanos: 0,
+        },
     }
 }
 
@@ -65,8 +69,9 @@ impl TryFrom<location_pb::Instance> for Instance {
     type Error = ClientError;
     fn try_from(pb: location_pb::Instance) -> Result<Self, Self::Error> {
         let created = required(pb.created, "location.Instance.created")?;
-        let id = InstanceId::try_from(pb.id.as_str())
-            .map_err(|e| ClientError::InvalidMessage(format!("invalid instance id '{}': {e}", pb.id)))?;
+        let id = InstanceId::try_from(pb.id.as_str()).map_err(|e| {
+            ClientError::InvalidMessage(format!("invalid instance id '{}': {e}", pb.id))
+        })?;
         Ok(Instance {
             id,
             location: pb.location.map(Location::from).unwrap_or_default(),
@@ -291,4 +296,3 @@ impl From<Shard> for pb::Shard {
         }
     }
 }
-

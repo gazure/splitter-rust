@@ -5,13 +5,14 @@
 //! Usage:
 //!     cargo run --example processor -- <endpoint> <tenant/service> [region] [node]
 
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::{
+    sync::{Arc, Mutex},
+    time::{Duration, SystemTime},
+};
 
-use splitter_client::processor::RecordingRange;
 use splitter_client::{
     DispatcherBuilder, GrantId, Instance, InstanceId, Location, Ownership, Processor,
-    QualifiedServiceName, RangeFactory, Shard,
+    QualifiedServiceName, RangeFactory, Shard, processor::RecordingRange,
 };
 use tonic::transport::Channel;
 
