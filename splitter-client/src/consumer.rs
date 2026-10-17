@@ -12,7 +12,7 @@ use crate::{
     session,
     wrap::{grant_state_from_i32, timestamp_to_system_time},
 };
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt, future::BoxFuture};
 use splitter_proto::pb::{
     self, ClientMessage, ConsumerMessage, JoinMessage, client_message, consumer_message,
     consumer_service_client::ConsumerServiceClient, join_message,
@@ -31,11 +31,23 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
+/// Bounded Join-session recovery. Existing grants retain only their current leases.
+#[derive(Clone, Debug)]
+pub struct ReconnectOptions {
+    /// Maximum duration of one disconnect episode, including connection attempts.
+    pub timeout: Duration,
+    /// Delay between connection attempts. Must be nonzero.
+    pub backoff: Duration,
+}
+
 /// User-facing options for `ConsumerClient::join`.
 #[derive(Clone, Debug, Default)]
 pub struct ConsumerOptions {
     pub key_names: Vec<DomainKeyName>,
     pub capacity_limit: u64,
+    /// If set, retry transient stream failures and replay unexpired grants.
+    /// Explicit session closure and permanent RPC errors remain terminal.
+    pub reconnect: Option<ReconnectOptions>,
 }
 
 impl ConsumerOptions {
@@ -45,6 +57,11 @@ impl ConsumerOptions {
     }
     pub fn with_capacity_limit(mut self, limit: u64) -> Self {
         self.capacity_limit = limit;
+        self
+    }
+    /// Enables bounded recovery with `options`. Zero durations are rejected by `join`.
+    pub fn with_reconnect(mut self, options: ReconnectOptions) -> Self {
+        self.reconnect = Some(options);
         self
     }
 }
@@ -129,6 +146,7 @@ struct Transport {
     outbound: mpsc::Sender<JoinMessage>,
     inbound: Inbound,
 }
+type Connector = Arc<dyn Fn(Vec<pb::Grant>) -> BoxFuture<'static, Result<Transport>> + Send + Sync>;
 
 impl ConsumerClient {
     pub fn new(channel: Channel) -> Self {
@@ -138,16 +156,36 @@ impl ConsumerClient {
     }
 
     /// Starts a session for `consumer` and `service` with `opts`.
-    /// Returns connection errors before spawning the driver.
+    /// Returns connection errors or invalid reconnect settings before spawning the driver.
     pub async fn join(
         &self,
         consumer: Instance,
         service: QualifiedServiceName,
         opts: ConsumerOptions,
     ) -> Result<JoinHandle> {
-        let transport =
-            open_session(self.inner.clone(), consumer, service, opts, Vec::new()).await?;
-        let (driver, mut handle) = Driver::new(transport);
+        if opts
+            .reconnect
+            .as_ref()
+            .is_some_and(|r| r.timeout.is_zero() || r.backoff.is_zero())
+        {
+            return Err(ClientError::InvalidMessage(
+                "reconnect durations must be nonzero".into(),
+            ));
+        }
+        let inner = self.inner.clone();
+        let options = opts.clone();
+        let connector: Connector = Arc::new(move |active| {
+            let (inner, consumer, service, opts) = (
+                inner.clone(),
+                consumer.clone(),
+                service.clone(),
+                options.clone(),
+            );
+            Box::pin(open_session(inner, consumer, service, opts, active))
+        });
+        let transport = connector(Vec::new()).await?;
+        let (mut driver, mut handle) = Driver::new(transport);
+        driver.reconnect = opts.reconnect.map(|options| (options, connector));
         handle.task = Some(tokio::spawn(driver.run()));
         Ok(handle)
     }
@@ -184,6 +222,7 @@ struct ActiveGrant {
     pb_grant: pb::Grant,
     ownership: Arc<Ownership>,
     revoked: bool,
+    confirmed: bool,
     watcher: TaskHandle<()>,
 }
 
@@ -218,6 +257,7 @@ struct Driver {
     grants: HashMap<GrantId, ActiveGrant>,
     actions_tx: mpsc::UnboundedSender<GrantAction>,
     actions: mpsc::UnboundedReceiver<GrantAction>,
+    reconnect: Option<(ReconnectOptions, Connector)>,
 }
 
 impl Drop for Driver {
@@ -256,6 +296,7 @@ impl Driver {
                 grants: HashMap::new(),
                 actions_tx,
                 actions,
+                reconnect: None,
             },
             handle,
         )
@@ -293,13 +334,88 @@ impl Driver {
                                 heartbeat = heartbeat_timer(Some(ttl));
                             }
                         }
-                        Some(Err(status)) => return Err(ClientError::Transport(status)),
-                        None => return Err(ClientError::SessionClosed("stream ended".into())),
+                        Some(Err(status)) => {
+                            if draining || !transient(&status) || self.reconnect.is_none() {
+                                return Err(ClientError::Transport(status));
+                            }
+                            heartbeat = heartbeat_timer(Some(self.reconnect().await?));
+                        }
+                        None => {
+                            if draining || self.reconnect.is_none() {
+                                return Err(ClientError::SessionClosed("stream ended".into()));
+                            }
+                            heartbeat = heartbeat_timer(Some(self.reconnect().await?));
+                        }
                     }
                 }
                 _ = heartbeat.tick() => self.send(session::heartbeat_frame()).await?,
             }
         }
+    }
+
+    async fn reconnect(&mut self) -> Result<SystemTime> {
+        let (options, connect) = self.reconnect.clone().expect("reconnect configured");
+        for grant in self.grants.values_mut() {
+            grant.confirmed = false;
+        }
+        self.cluster.send_replace(Arc::new(ClusterMap::empty()));
+        let attempt = async {
+            loop {
+                tokio::time::sleep(options.backoff).await;
+                let active = self
+                    .grants
+                    .values()
+                    .filter(|g| {
+                        !g.revoked
+                            && !g.ownership.expired.is_closed()
+                            && SystemTime::now() < g.ownership.expiration()
+                    })
+                    .map(|g| g.pb_grant.clone())
+                    .collect();
+                match connect(active).await {
+                    Ok(mut transport) => {
+                        // An RPC response alone is not recovery. Keep silent or
+                        // repeatedly broken establishment inside this deadline.
+                        match transport.inbound.next().await {
+                            Some(Ok(JoinMessage {
+                                msg: Some(join_message::Msg::Session(message)),
+                            })) => match session::classify(&message) {
+                                Some(session::SessionEvent::Established { ttl }) => {
+                                    return Ok((transport, ttl));
+                                }
+                                Some(session::SessionEvent::Closed { error }) => {
+                                    return Err(ClientError::SessionClosed(error));
+                                }
+                                _ => {
+                                    return Err(ClientError::InvalidMessage(
+                                        "expected session Established during reconnect".into(),
+                                    ));
+                                }
+                            },
+                            Some(Err(status)) if transient(&status) => {}
+                            Some(Err(status)) => return Err(ClientError::Transport(status)),
+                            None => {}
+                            _ => {
+                                return Err(ClientError::InvalidMessage(
+                                    "expected session Established during reconnect".into(),
+                                ));
+                            }
+                        }
+                    }
+                    Err(ClientError::Transport(status)) if transient(&status) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        };
+        let (transport, ttl) = tokio::select! {
+            biased;
+            _ = self.shutdown.closed() => return Err(ClientError::SessionClosed("shutdown while disconnected".into())),
+            result = tokio::time::timeout(options.timeout, attempt) => {
+                result.map_err(|_| ClientError::SessionClosed("reconnect timed out".into()))??
+            }
+        };
+        self.transport = transport;
+        Ok(ttl)
     }
 
     async fn handle_inbound(&mut self, join: JoinMessage) -> Result<Option<SystemTime>> {
@@ -415,6 +531,7 @@ impl Driver {
                     || (matches!(current, GrantState::Allocated | GrantState::AllocatedLoaded)
                         && state == GrantState::Active)
                 {
+                    entry.confirmed = true;
                     entry.ownership.set_expiration(expiration);
                     if state == GrantState::Active {
                         entry.ownership.activate();
@@ -457,6 +574,7 @@ impl Driver {
                 pb_grant: g,
                 ownership: ownership.clone(),
                 revoked: matches!(state, GrantState::Revoked | GrantState::RevokedUnloaded),
+                confirmed: true,
                 watcher,
             },
         );
@@ -489,6 +607,7 @@ impl Driver {
                 entry.ownership.set_expiration(expiration);
             }
             entry.pb_grant = g;
+            entry.confirmed = true;
             entry.ownership.activate();
         }
     }
@@ -503,6 +622,7 @@ impl Driver {
             let already_unloaded =
                 grant_state_from_i32(entry.pb_grant.state) == GrantState::RevokedUnloaded;
             entry.revoked = true;
+            entry.confirmed = true;
             if let Some(expiration) = g.lease.as_ref().map(timestamp_to_system_time) {
                 entry.ownership.set_expiration(expiration);
             }
@@ -540,6 +660,7 @@ impl Driver {
         };
         for entry in self.grants.values_mut() {
             if !entry.revoked
+                && entry.confirmed
                 && !entry.ownership.expired.is_closed()
                 && SystemTime::now() < entry.ownership.expiration()
             {
@@ -582,6 +703,9 @@ impl Driver {
                 };
                 entry.pb_grant.state = next as i32;
                 let grant = entry.pb_grant.clone();
+                if !entry.confirmed {
+                    return Ok(());
+                }
                 self.send(wrap_client(client_message::Msg::Update(
                     client_message::Update { grant: Some(grant) },
                 )))
@@ -628,6 +752,13 @@ fn heartbeat_timer(ttl: Option<SystemTime>) -> tokio::time::Interval {
     let mut timer = tokio::time::interval_at(tokio::time::Instant::now() + delay, delay);
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     timer
+}
+
+fn transient(status: &tonic::Status) -> bool {
+    matches!(
+        status.code(),
+        tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Cancelled
+    )
 }
 
 fn spawn_grant_watcher(

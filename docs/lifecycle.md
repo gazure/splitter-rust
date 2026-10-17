@@ -1,4 +1,4 @@
-# Range lifecycle
+# Range lifecycle and session recovery
 
 The dispatcher reconciles current ownership, stops application ranges when their
 leases end, and waits for handover during graceful shutdown. This behavior
@@ -66,9 +66,41 @@ Cancellation is cooperative. Synchronous application code that blocks a runtime
 worker cannot be preempted by an async timeout. Ranges must stop side effects when
 closed; storage-level fencing is still required for durable external writes.
 
+## Optional reconnect
+
+Reconnect is disabled by default. Enable bounded recovery for transient stream
+failures or EOF with these options:
+
+```rust
+use std::time::Duration;
+use splitter_client::{ConsumerOptions, ReconnectOptions};
+
+let options = ConsumerOptions::default().with_reconnect(ReconnectOptions {
+    timeout: Duration::from_secs(30),
+    backoff: Duration::from_secs(1),
+});
+```
+
+The timeout includes connection attempts and the server's `Established` response.
+A silent or repeatedly failing establishment cannot reset the deadline. Shutdown
+interrupts recovery. Explicit session closure and permanent RPC errors remain
+terminal; an initial `join()` connection error still returns to its caller.
+
+Registration replays non-revoked grants whose leases remain valid. The existing
+range and ownership identity survive compatible reassignment. Unconfirmed grants
+keep their old deadlines and do not receive lease extensions from the new
+session. Confirmed replay resends locally advanced load state and outstanding
+revoke requests. Repeated revocation resends unload state. Expired ownership is
+never revived; a later assignment creates a new ownership instance.
+
+An outbound stream that remains blocked for five seconds terminates the session.
+Automatic recovery currently applies to inbound transient failures and EOF;
+callers still need to supervise terminal session failures.
+
 ## Compatibility and validation
 
-`Range` and `RangeFactory` signatures are unchanged.
+`Range` and `RangeFactory` signatures are unchanged. Direct `ConsumerOptions`
+struct literals need the new `reconnect` field, or `..Default::default()`.
 Dropping a Join handle now cancels its driver, so retain the handle for the desired
 session lifetime. The lockfile updates Tokio to 1.53.1 and `async-trait` to 0.1.92;
 the latter avoids a generated `double_must_use` lint on the installed nightly.
@@ -76,7 +108,7 @@ The existing `result_large_err` Clippy allowance is unchanged.
 
 The deterministic tests use in-memory protocol streams and cover startup bursts,
 assignment replacement, session cleanup, cancelled shutdown, lease changes,
-handover acknowledgements and release.
+handover acknowledgements, release, reconnect replay, and recovery deadlines.
 The two-consumer protocol test checks that the new range is built only after the
 old range drains and that the old grant is released after counterpart load.
 
