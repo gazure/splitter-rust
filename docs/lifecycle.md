@@ -66,10 +66,24 @@ Cancellation is cooperative. Synchronous application code that blocks a runtime
 worker cannot be preempted by an async timeout. Ranges must stop side effects when
 closed; storage-level fencing is still required for durable external writes.
 
+## Session deadlines
+
+After the initial Join RPC returns a stream, the driver allows 30 seconds for
+the first session TTL. Each `Established` or heartbeat acknowledgement replaces
+the deadline with the server's absolute expiration, converted to a monotonic
+timer when received. Acknowledgements can extend or shorten the deadline.
+Other inbound messages and outbound heartbeats do not renew it.
+
+The deadline covers message handling and outbound sends, so a blocked send cannot
+keep an expired session alive. Expiration triggers bounded reconnect when enabled.
+Without reconnect, or during graceful shutdown, the driver closes and expires its
+remaining grants. During reconnect, grants retain only their existing leases.
+An initial RPC that has not returned a stream still needs a caller-supplied timeout.
+
 ## Optional reconnect
 
 Reconnect is disabled by default. Enable bounded recovery for transient stream
-failures or EOF with these options:
+failures, EOF, or session expiration with these options:
 
 ```rust
 use std::time::Duration;
@@ -82,7 +96,7 @@ let options = ConsumerOptions::default().with_reconnect(ReconnectOptions {
 ```
 
 The timeout includes connection attempts and the server's `Established` response.
-A silent or repeatedly failing establishment cannot reset the deadline. Shutdown
+A silent, expired, or repeatedly failing establishment cannot reset the deadline. Shutdown
 interrupts recovery. Explicit session closure and permanent RPC errors remain
 terminal; an initial `join()` connection error still returns to its caller.
 
@@ -93,9 +107,10 @@ session. Confirmed replay resends locally advanced load state and outstanding
 revoke requests. Repeated revocation resends unload state. Expired ownership is
 never revived; a later assignment creates a new ownership instance.
 
-An outbound stream that remains blocked for five seconds terminates the session.
-Automatic recovery currently applies to inbound transient failures and EOF;
-callers still need to supervise terminal session failures.
+An outbound stream that remains blocked for five seconds terminates the session,
+unless the session deadline expires first and triggers recovery. Automatic
+recovery applies to inbound transient failures, EOF, and session expiration;
+callers still need to supervise other terminal session failures.
 
 ## Compatibility and validation
 
@@ -109,6 +124,8 @@ The existing `result_large_err` Clippy allowance is unchanged.
 The deterministic tests use in-memory protocol streams and cover startup bursts,
 assignment replacement, session cleanup, cancelled shutdown, lease changes,
 handover acknowledgements, release, reconnect replay, and recovery deadlines.
+Paused-time tests also exercise silent sessions, heartbeat renewal and shortening,
+blocked outbound sends, and recovery after session expiration.
 The two-consumer protocol test checks that the new range is built only after the
 old range drains and that the old grant is released after counterpart load.
 

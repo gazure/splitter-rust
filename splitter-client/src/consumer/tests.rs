@@ -5,6 +5,8 @@ use crate::{
 };
 use tokio::time::timeout;
 
+mod deadline;
+
 struct Harness {
     driver: Driver,
     handle: JoinHandle,
