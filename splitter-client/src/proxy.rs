@@ -9,7 +9,7 @@
 //!      gRPC client for the remote owner; we invoke `remote` against it and
 //!      translate any `tonic::Status` back into a [`ClientError`] via
 //!      [`ClientError::from_grpc`].
-//!   3. If `resolve` returns `NoResolution` (no remote owner known), fall
+//!   3. If `resolve` returns `NoResolution` (owner resolves locally), fall
 //!      back to a local lookup across *any* state. If still empty, return
 //!      `NotOwned`.
 //!   4. Other resolve errors propagate.
@@ -37,8 +37,9 @@ pub trait Proxy: Send + Sync + 'static {
     type Client: Send;
     type Value: Send + Sync + Clone;
 
-    /// Return a gRPC client for the remote owner, or `Err(NoResolution)` if
-    /// this key is not owned by a reachable peer.
+    /// Returns a gRPC client for the remote owner or `NoResolution` for a local owner.
+    /// Returns `NotOwned` for unknown ownership and a retryable transport error
+    /// for an unavailable remote peer.
     fn resolve(&self, key: &Self::Key) -> Result<Self::Client>;
 
     /// Look up a locally-owned value by key, preferring the given grant

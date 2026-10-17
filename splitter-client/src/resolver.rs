@@ -4,7 +4,7 @@
 //! finds the owning consumer in the latest cluster snapshot and returns a
 //! user-typed gRPC client over the peer `Channel`.
 //!
-//! Full `Proxy`/`handle`/`handle_with_retry` machinery lives in Phase 4.
+//! Uses the cluster lookup order: active, revoked, loaded, then unloaded.
 
 use std::sync::Arc;
 
@@ -14,9 +14,12 @@ use tonic::transport::Channel;
 use crate::{
     cluster::ClusterMap,
     error::ClientError,
-    ids::{GrantState, Location, QualifiedDomainKey, QualifiedDomainName},
+    ids::{Location, QualifiedDomainKey, QualifiedDomainName},
     pool::ConnectionPool,
 };
+
+#[cfg(test)]
+mod tests;
 
 /// Map a peer `Channel` into a user-defined gRPC client.
 pub type RemoteFn<C> = Arc<dyn Fn(Channel) -> C + Send + Sync>;
@@ -26,8 +29,6 @@ pub struct DomainResolver<C> {
     cluster: watch::Receiver<Arc<ClusterMap>>,
     domain: QualifiedDomainName,
     remote_fn: RemoteFn<C>,
-    /// Grant states to consider during lookup, in priority order.
-    preferred_states: Vec<GrantState>,
 }
 
 impl<C> DomainResolver<C> {
@@ -45,11 +46,6 @@ impl<C> DomainResolver<C> {
             cluster,
             domain,
             remote_fn: Arc::new(remote_fn),
-            preferred_states: vec![
-                GrantState::Active,
-                GrantState::AllocatedLoaded,
-                GrantState::Revoked,
-            ],
         }
     }
 
@@ -59,16 +55,21 @@ impl<C> DomainResolver<C> {
 
     /// Look up the owning consumer's location without dialing.
     pub fn location(&self, key: &QualifiedDomainKey) -> Option<Location> {
+        if key.domain != self.domain {
+            return None;
+        }
         let cluster = self.cluster.borrow();
         cluster
-            .lookup(key, &self.preferred_states)
+            .lookup(key, &[])
             .and_then(|g| cluster.consumers.get(&g.consumer))
             .map(|c| c.consumer.location.clone())
     }
 
-    /// Resolve to the owner's gRPC client. Returns `NoResolution` if the key
-    /// is not owned, is owned by this consumer (caller should use the local
-    /// path), or the peer hasn't advertised a server endpoint.
+    /// Resolves the owner's gRPC client for `key`.
+    ///
+    /// Returns `NoResolution` for a local owner, `NotOwned` for an unknown owner,
+    /// and a retryable transport error when the remote peer is unavailable.
+    /// Returns `InvalidMessage` if the key belongs to another domain.
     pub fn resolve(&self, key: &QualifiedDomainKey) -> Result<C, ClientError> {
         if key.domain != self.domain {
             return Err(ClientError::InvalidMessage(format!(
@@ -77,9 +78,7 @@ impl<C> DomainResolver<C> {
             )));
         }
         let cluster = self.cluster.borrow();
-        let grant = cluster
-            .lookup(key, &self.preferred_states)
-            .ok_or(ClientError::NoResolution)?;
+        let grant = cluster.lookup(key, &[]).ok_or(ClientError::NotOwned)?;
         let channel = self.pool.resolve(&grant.consumer)?;
         Ok((self.remote_fn)(channel))
     }

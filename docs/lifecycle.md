@@ -131,6 +131,11 @@ callers still need to supervise other terminal session failures.
 
 ## Request retry deadlines
 
+The domain resolver uses Go's default routing priority: active, revoked, loaded,
+then unloaded. Unknown ownership returns `NotOwned`. A remote peer missing from
+the connection pool returns retryable `Unavailable`. Only a local owner returns
+`NoResolution`, which permits `handle` to fall back to a non-active local range.
+
 `retry_ownership` and `handle_with_retry` include both attempts and backoff in
 their timeout budget. If an in-flight attempt reaches the deadline, the helper
 drops its future and returns `ClientError::RetryTimeout`, which maps to gRPC
