@@ -107,6 +107,15 @@ session. Confirmed replay resends locally advanced load state and outstanding
 revoke requests. Repeated revocation resends unload state. Expired ownership is
 never revived; a later assignment creates a new ownership instance.
 
+The routing map survives reconnect so a partial coordinator snapshot can retain
+valid peer routes. Like the Go client, the Rust client keeps omitted grants only
+while their shards remain present and their states are compatible with the new
+assignments. An allocated or loaded grant can coexist with a revoked or unloaded
+grant for the same shard. New assignments and state updates take precedence over
+retained grants, so activation removes a conflicting former owner. Snapshots drop
+omitted consumers without surviving grants; incremental changes keep consumers
+until explicitly removed. Terminal session closure clears the routing map.
+
 An outbound stream that remains blocked for five seconds terminates the session,
 unless the session deadline expires first and triggers recovery. Automatic
 recovery applies to inbound transient failures, EOF, and session expiration;

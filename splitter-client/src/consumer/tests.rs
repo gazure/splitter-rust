@@ -5,6 +5,7 @@ use crate::{
 };
 use tokio::time::timeout;
 
+mod cluster;
 mod deadline;
 
 struct Harness {
