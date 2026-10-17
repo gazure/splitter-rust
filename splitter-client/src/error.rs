@@ -29,6 +29,9 @@ pub enum ClientError {
     SessionClosed(String),
     #[error("dispatcher drain timed out")]
     DrainTimeout,
+    /// The initial Join RPC did not return a stream within its timeout.
+    #[error("initial Join RPC deadline elapsed")]
+    JoinTimeout,
     /// The ownership retry budget elapsed before an attempt completed.
     #[error("ownership retry deadline elapsed")]
     RetryTimeout,
@@ -55,6 +58,9 @@ impl ClientError {
             ClientError::NoResolution => Status::unavailable("no resolution"),
             ClientError::Revoked => Status::aborted("revoked"),
             ClientError::DrainTimeout => Status::deadline_exceeded("dispatcher drain timed out"),
+            ClientError::JoinTimeout => {
+                Status::deadline_exceeded("initial Join RPC deadline elapsed")
+            }
             ClientError::RetryTimeout => {
                 Status::deadline_exceeded("ownership retry deadline elapsed")
             }

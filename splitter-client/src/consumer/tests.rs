@@ -7,6 +7,7 @@ use tokio::time::timeout;
 
 mod cluster;
 mod deadline;
+mod initial_join;
 
 struct Harness {
     driver: Driver,
