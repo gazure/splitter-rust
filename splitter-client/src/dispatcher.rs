@@ -6,22 +6,25 @@
 //! grant for its lifetime. If no filter accepts a grant, the dispatcher asks
 //! the coordinator to revoke it via `Ownership::request_revoke`.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use tokio::sync::watch;
-use tokio::task::JoinHandle as TaskHandle;
+use tokio::{
+    sync::watch,
+    task::{AbortHandle, JoinHandle as TaskHandle, JoinSet},
+};
 use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
-use crate::cluster::ClusterMap;
-use crate::consumer::{ConsumerClient, ConsumerOptions, GrantEvent, JoinHandle};
-use crate::error::Result;
-use crate::ids::{GrantId, Instance, QualifiedServiceName, Shard};
-use crate::latch::{Latch, LatchReader};
-use crate::ownership::Ownership;
-use crate::pool::ConnectionPool;
+use crate::{
+    cluster::ClusterMap,
+    consumer::{AssignmentSnapshot, ConsumerClient, ConsumerOptions, JoinHandle},
+    error::{ClientError, Result},
+    ids::{GrantId, Instance, QualifiedServiceName, Shard},
+    latch::{Latch, LatchReader},
+    ownership::Ownership,
+    pool::ConnectionPool,
+};
 
 /// Context passed to a filter's `init`.
 #[derive(Clone)]
@@ -103,7 +106,9 @@ impl DispatcherBuilder {
         }
 
         let closed = Latch::new();
-        let grants_task = spawn_grants_router(join.subscribe_grants(), chain.clone());
+        let force = Latch::new();
+        let grants_task =
+            spawn_grants_router(join.assignments.clone(), chain.clone(), force.reader());
         let pool_task = spawn_pool_updater(pool.clone(), join.cluster.clone());
         let closed_watcher = spawn_closed_watcher(join.closed(), closed.clone());
 
@@ -115,6 +120,7 @@ impl DispatcherBuilder {
             chain,
             closed,
             join: Some(join),
+            force,
             tasks: vec![grants_task, pool_task, closed_watcher],
         })
     }
@@ -129,6 +135,7 @@ pub struct Dispatcher {
     closed: Latch,
     join: Option<JoinHandle>,
     tasks: Vec<TaskHandle<()>>,
+    force: Latch,
 }
 
 impl Dispatcher {
@@ -151,26 +158,34 @@ impl Dispatcher {
         &self.chain
     }
 
-    /// Initiate graceful shutdown. Sends `Deregister`, then waits up to
-    /// `timeout` for the stream to close. Aborts background tasks on return.
+    /// Deregisters, waits for range handover, and joins all dispatcher tasks.
+    ///
+    /// If `timeout` elapses, aborts the remaining tasks and returns
+    /// `ClientError::DrainTimeout`. Dropping this future also cancels shutdown.
     pub async fn drain(mut self, timeout: Duration) -> Result<()> {
         info!(id = %self.id, "dispatcher draining");
-        let res = if let Some(join) = self.join.take() {
-            match tokio::time::timeout(timeout, join.shutdown()).await {
-                Ok(r) => r,
-                Err(_) => {
-                    warn!(?timeout, "dispatcher drain timed out");
-                    Ok(())
-                }
+        let result = tokio::time::timeout(timeout, async {
+            let result = match self.join.take() {
+                Some(join) => join.shutdown().await,
+                None => Ok(()),
+            };
+            while let Some(task) = self.tasks.first_mut() {
+                let _ = task.await;
+                self.tasks.remove(0);
             }
-        } else {
-            Ok(())
-        };
-        for t in self.tasks.drain(..) {
-            t.abort();
+            result
+        })
+        .await;
+        if result.is_err() {
+            self.force.close();
+            // The router shuts down and joins its child tasks. The cancelled
+            // JoinHandle aborts the driver, waking the pool and closed watcher.
+            for task in self.tasks.drain(..) {
+                let _ = task.await;
+            }
         }
         self.closed.close();
-        res
+        result.unwrap_or(Err(ClientError::DrainTimeout))
     }
 }
 
@@ -184,28 +199,55 @@ impl Drop for Dispatcher {
 }
 
 fn spawn_grants_router(
-    mut grants: tokio::sync::broadcast::Receiver<GrantEvent>,
+    mut assignments: watch::Receiver<AssignmentSnapshot>,
     chain: Arc<Vec<Arc<dyn DispatchFilter>>>,
+    force: LatchReader,
 ) -> TaskHandle<()> {
     tokio::spawn(async move {
+        let mut tasks = JoinSet::new();
+        let mut running: HashMap<GrantId, (Arc<Ownership>, AbortHandle)> = HashMap::new();
         loop {
-            match grants.recv().await {
-                Ok(GrantEvent::Assigned {
-                    id,
-                    shard,
-                    ownership,
-                }) => {
-                    let chain = chain.clone();
-                    tokio::spawn(run_chain(chain, id, shard, ownership));
+            let snapshot = assignments.borrow_and_update().clone();
+            running.retain(|id, (ownership, task)| {
+                let current = snapshot
+                    .get(id)
+                    .is_some_and(|entry| Arc::ptr_eq(ownership, &entry.ownership));
+                if !current {
+                    task.abort();
                 }
-                Ok(GrantEvent::Removed { id }) => debug!(%id, "grant removed"),
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(dropped = n, "grants broadcast lagged");
+                current
+            });
+            for (id, assignment) in snapshot.iter() {
+                if !running.contains_key(id) && !assignment.ownership.expired().is_closed() {
+                    let abort = tasks.spawn(run_chain(
+                        chain.clone(),
+                        id.clone(),
+                        assignment.shard.clone(),
+                        assignment.ownership.clone(),
+                    ));
+                    // Retain finished identities until removal so snapshot
+                    // updates cannot restart a completed handler.
+                    running.insert(id.clone(), (assignment.ownership.clone(), abort));
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+            tokio::select! {
+                biased;
+                _ = force.closed() => break,
+                changed = assignments.changed() => if changed.is_err() { break; },
+                result = tasks.join_next(), if !tasks.is_empty() => {
+                    if let Some(Err(error)) = result { debug!(%error, "grant task exited"); }
+                }
             }
         }
+        tasks.shutdown().await;
     })
+}
+
+struct ReleaseOnExit(Arc<Ownership>);
+impl Drop for ReleaseOnExit {
+    fn drop(&mut self) {
+        self.0.release();
+    }
 }
 
 async fn run_chain(
@@ -214,6 +256,7 @@ async fn run_chain(
     shard: Shard,
     ownership: Arc<Ownership>,
 ) {
+    let _release = ReleaseOnExit(ownership.clone());
     if ownership.expired().is_closed() {
         debug!(%id, "grant already expired before dispatch");
         return;
@@ -248,3 +291,6 @@ fn spawn_closed_watcher(inner: LatchReader, closed: Latch) -> TaskHandle<()> {
         closed.close();
     })
 }
+
+#[cfg(test)]
+mod tests;

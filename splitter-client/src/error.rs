@@ -27,6 +27,8 @@ pub enum ClientError {
     Expired,
     #[error("session closed: {0}")]
     SessionClosed(String),
+    #[error("dispatcher drain timed out")]
+    DrainTimeout,
     #[error("cancelled")]
     Cancelled,
     #[error("invalid message: {0}")]
@@ -46,6 +48,7 @@ impl ClientError {
             ClientError::Draining => Status::aborted("draining"),
             ClientError::NoResolution => Status::unavailable("no resolution"),
             ClientError::Revoked => Status::aborted("revoked"),
+            ClientError::DrainTimeout => Status::deadline_exceeded("dispatcher drain timed out"),
             ClientError::Expired => Status::deadline_exceeded("expired"),
             ClientError::SessionClosed(msg) => Status::unavailable(msg),
             ClientError::Cancelled => Status::cancelled("cancelled"),

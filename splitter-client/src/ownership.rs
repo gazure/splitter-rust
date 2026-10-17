@@ -23,15 +23,15 @@
 //! The user only ever closes `loader.load`, `unloader.unload`, and the
 //! `request_revoke` signal.
 
-use std::fmt;
-use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::{fmt, sync::Arc, time::SystemTime};
 
-use tokio::sync::Notify;
+use tokio::sync::watch;
 
-use crate::error::ClientError;
-use crate::ids::GrantState;
-use crate::latch::{Latch, LatchReader};
+use crate::{
+    error::ClientError,
+    ids::GrantState,
+    latch::{Latch, LatchReader},
+};
 
 /// Handover controls for the "taking over" (ALLOCATED) phase.
 pub struct Loader {
@@ -93,10 +93,8 @@ pub struct Ownership {
     pub(crate) request_revoke_signal: Latch,
     pub(crate) loader: Arc<Loader>,
     pub(crate) unloader: Arc<Unloader>,
-    pub(crate) expiration: Mutex<SystemTime>,
-    /// Notified when `expiration` is updated so the per-grant expiration timer
-    /// can re-read the deadline.
-    pub(crate) expiration_changed: Notify,
+    pub(crate) released: Latch,
+    expiration: watch::Sender<SystemTime>,
 }
 
 impl fmt::Debug for Ownership {
@@ -121,8 +119,8 @@ impl Ownership {
             request_revoke_signal: Latch::new(),
             loader: Loader::new(),
             unloader: Unloader::new(),
-            expiration: Mutex::new(expiration),
-            expiration_changed: Notify::new(),
+            released: Latch::new(),
+            expiration: watch::channel(expiration).0,
         });
         // Mirror grant.go:107 — pre-close latches for already-reached states.
         match initial_state {
@@ -130,7 +128,7 @@ impl Ownership {
             GrantState::Revoked | GrantState::RevokedUnloaded => o.revoked.close(),
             _ => {}
         }
-        if SystemTime::now() > expiration {
+        if SystemTime::now() >= expiration {
             o.expired.close();
         }
         o
@@ -153,7 +151,7 @@ impl Ownership {
     }
 
     pub fn expiration(&self) -> SystemTime {
-        *self.expiration.lock().expect("expiration mutex poisoned")
+        *self.expiration.borrow()
     }
 
     /// Request that the coordinator revoke this grant. Does NOT block on the
@@ -163,10 +161,40 @@ impl Ownership {
         self.request_revoke_signal.close();
     }
 
+    /// Relinquishes this grant after application work has stopped.
+    ///
+    /// This is terminal and idempotent. The driver sends `Released` with the
+    /// current grant state. Processors and dispatchers call this automatically;
+    /// direct consumer users must call it after their lifecycle handler exits.
+    pub fn release(&self) {
+        self.released.close();
+        self.expire();
+    }
+
+    /// Waits for hard expiration, observing lease changes without lost wakeups.
+    pub(crate) async fn wait_for_expiration(&self) {
+        let mut deadline = self.expiration.subscribe();
+        loop {
+            let remaining = deadline
+                .borrow_and_update()
+                .duration_since(SystemTime::now())
+                .unwrap_or_default();
+            if self.expired.is_closed() || remaining.is_zero() {
+                self.expire();
+                return;
+            }
+            tokio::select! {
+                biased;
+                _ = self.expired.closed() => return,
+                _ = deadline.changed() => {},
+                _ = tokio::time::sleep(remaining) => {},
+            }
+        }
+    }
+
     /// Driver-side updates. Not part of the public API.
     pub(crate) fn set_expiration(&self, deadline: SystemTime) {
-        *self.expiration.lock().expect("expiration mutex poisoned") = deadline;
-        self.expiration_changed.notify_waiters();
+        self.expiration.send_replace(deadline);
     }
 
     pub(crate) fn activate(&self) {
@@ -197,13 +225,13 @@ impl Ownership {
         let active = self.active.reader();
         let unloaded = self.loader.unloaded.reader();
         let revoked = self.revoked.reader();
-        let expired = self.expired.reader();
 
         tokio::select! {
+            biased;
+            _ = self.wait_for_expiration() => Err(ClientError::Expired),
+            _ = revoked.closed() => Err(ClientError::Revoked),
             _ = active.closed() => Ok(self.loader.clone()),
             _ = unloaded.closed() => Ok(self.loader.clone()),
-            _ = revoked.closed() => Err(ClientError::Revoked),
-            _ = expired.closed() => Err(ClientError::Expired),
         }
     }
 
@@ -211,11 +239,11 @@ impl Ownership {
     pub async fn wait_for_active(&self) -> Result<(), ClientError> {
         let active = self.active.reader();
         let revoked = self.revoked.reader();
-        let expired = self.expired.reader();
         tokio::select! {
-            _ = active.closed() => Ok(()),
+            biased;
+            _ = self.wait_for_expiration() => Err(ClientError::Expired),
             _ = revoked.closed() => Err(ClientError::Revoked),
-            _ = expired.closed() => Err(ClientError::Expired),
+            _ = active.closed() => Ok(()),
         }
     }
 
@@ -223,30 +251,30 @@ impl Ownership {
     /// expiration.
     pub async fn wait_for_revoke(self: &Arc<Self>) -> Result<Arc<Unloader>, ClientError> {
         let revoked = self.revoked.reader();
-        let expired = self.expired.reader();
         tokio::select! {
+            biased;
+            _ = self.wait_for_expiration() => Err(ClientError::Expired),
             _ = revoked.closed() => Ok(self.unloader.clone()),
-            _ = expired.closed() => Err(ClientError::Expired),
         }
     }
 
     /// Block until the next counterpart has loaded. Errors on expiration.
     pub async fn wait_for_load(&self) -> Result<(), ClientError> {
         let loaded = self.unloader.loaded.reader();
-        let expired = self.expired.reader();
         tokio::select! {
+            biased;
+            _ = self.wait_for_expiration() => Err(ClientError::Expired),
             _ = loaded.closed() => Ok(()),
-            _ = expired.closed() => Err(ClientError::Expired),
         }
     }
 
     /// Block on a user-supplied action latch (e.g. `Range::initialized()` or
     /// the drain completion latch). Errors on expiration.
     pub async fn wait_for_action(&self, action: LatchReader) -> Result<(), ClientError> {
-        let expired = self.expired.reader();
         tokio::select! {
+            biased;
+            _ = self.wait_for_expiration() => Err(ClientError::Expired),
             _ = action.closed() => Ok(()),
-            _ = expired.closed() => Err(ClientError::Expired),
         }
     }
 }
@@ -361,15 +389,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_expiration_wakes_waiters() {
+    async fn shortened_deadline_wakes_existing_waiter() {
         let o = Ownership::new(GrantState::Active, far_future());
         let o2 = o.clone();
-        let waiter = tokio::spawn(async move { o2.expiration_changed.notified().await });
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        o.set_expiration(SystemTime::now() + Duration::from_secs(10));
-        timeout(Duration::from_millis(50), waiter)
+        let waiter = tokio::spawn(async move { o2.wait_for_expiration().await });
+        tokio::task::yield_now().await;
+        o.set_expiration(SystemTime::UNIX_EPOCH);
+        timeout(Duration::from_secs(1), waiter)
             .await
-            .expect("notified")
-            .expect("task ok");
+            .unwrap()
+            .unwrap();
+        assert!(o.expired().is_closed());
+    }
+
+    #[tokio::test]
+    async fn terminal_signals_win_over_ready_success() {
+        let o = Ownership::new(GrantState::Active, far_future());
+        o.revoke();
+        assert!(matches!(
+            o.wait_for_active().await,
+            Err(ClientError::Revoked)
+        ));
+        assert!(matches!(
+            o.wait_for_unload().await,
+            Err(ClientError::Revoked)
+        ));
+        o.counterpart_loaded();
+        o.expire();
+        let done = Latch::new();
+        done.close();
+        assert!(matches!(
+            o.wait_for_active().await,
+            Err(ClientError::Expired)
+        ));
+        assert!(matches!(
+            o.wait_for_unload().await,
+            Err(ClientError::Expired)
+        ));
+        assert!(matches!(
+            o.wait_for_revoke().await,
+            Err(ClientError::Expired)
+        ));
+        assert!(matches!(o.wait_for_load().await, Err(ClientError::Expired)));
+        assert!(matches!(
+            o.wait_for_action(done.reader()).await,
+            Err(ClientError::Expired)
+        ));
+    }
+
+    #[tokio::test]
+    async fn deadline_is_checked_before_ready_activation() {
+        let o = Ownership::new(GrantState::Active, far_future());
+        o.set_expiration(SystemTime::UNIX_EPOCH);
+        assert!(matches!(
+            o.wait_for_active().await,
+            Err(ClientError::Expired)
+        ));
     }
 }

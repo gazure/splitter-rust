@@ -12,17 +12,21 @@
 //! Any step may abort on `Ownership::expired()` firing, at which point the
 //! Range is closed and cleaned up via the RAII `GrantCleanup` guard.
 
-use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use async_trait::async_trait;
 use tracing::debug;
 
-use crate::dispatcher::{DispatchFilter, FilterContext};
-use crate::grant_map::GrantMap;
-use crate::ids::{GrantId, Shard};
-use crate::latch::{Latch, LatchReader};
-use crate::ownership::Ownership;
+use crate::{
+    dispatcher::{DispatchFilter, FilterContext},
+    grant_map::GrantMap,
+    ids::{GrantId, Shard},
+    latch::{Latch, LatchReader},
+    ownership::{Loader, Ownership},
+};
 
 /// A user-supplied range-of-ownership. The `Range` governs whatever state
 /// lives behind a single assigned shard (e.g. a per-range HashMap of actors,
@@ -53,12 +57,7 @@ pub trait RangeFactory: Send + Sync + 'static {
     /// Build a `Range` for `shard`, or return `None` if this factory doesn't
     /// handle that shard's domain. Returning `None` causes the Processor to
     /// delegate to the next `DispatchFilter` in the chain.
-    fn build(
-        &self,
-        id: GrantId,
-        shard: Shard,
-        ownership: Arc<Ownership>,
-    ) -> Option<Self::Range>;
+    fn build(&self, id: GrantId, shard: Shard, ownership: Arc<Ownership>) -> Option<Self::Range>;
 }
 
 pub struct Processor<F: RangeFactory> {
@@ -87,13 +86,12 @@ impl<F: RangeFactory> DispatchFilter for Processor<F> {
         self.initialized.close();
     }
 
-    async fn try_handle(
-        &self,
-        id: GrantId,
-        shard: Shard,
-        ownership: Arc<Ownership>,
-    ) -> bool {
+    async fn try_handle(&self, id: GrantId, shard: Shard, ownership: Arc<Ownership>) -> bool {
         self.initialized.closed().await;
+        let loader = match ownership.wait_for_unload().await {
+            Ok(loader) => loader,
+            Err(_) => return true,
+        };
         let Some(range) = self
             .factory
             .build(id.clone(), shard.clone(), ownership.clone())
@@ -101,7 +99,7 @@ impl<F: RangeFactory> DispatchFilter for Processor<F> {
             return false;
         };
         let range = Arc::new(range);
-        self.run_grant(id, shard, ownership, range).await;
+        self.run_grant(id, shard, ownership, range, loader).await;
         true
     }
 }
@@ -113,20 +111,13 @@ impl<F: RangeFactory> Processor<F> {
         shard: Shard,
         o: Arc<Ownership>,
         range: Arc<F::Range>,
+        loader: Arc<Loader>,
     ) {
         let _cleanup = GrantCleanup::<F::Range> {
             id: id.clone(),
             grants: self.grants.clone(),
             range: range.clone(),
-        };
-
-        // Step 1: Wait for counterpart unload (or outright activation).
-        let loader = match o.wait_for_unload().await {
-            Ok(l) => l,
-            Err(e) => {
-                debug!(%id, error = %e, "step 1 bail");
-                return;
-            }
+            ownership: o.clone(),
         };
 
         // Step 2: Record the grant and wait for Range initialization. Race
@@ -137,59 +128,66 @@ impl<F: RangeFactory> Processor<F> {
         let init = range.initialized();
         let closed = range.closed();
         tokio::select! {
+            biased;
+            _ = closed.closed() => return,
+            _ = o.revoked.closed() => return,
             res = o.wait_for_action(init) => {
                 if let Err(e) = res {
                     debug!(%id, error = %e, "step 2 init bail");
                     return;
                 }
             }
-            _ = closed.closed() => {
-                debug!(%id, "range closed during init");
-                return;
-            }
         }
         loader.load();
-        self.grants
-            .loaded(id.clone(), shard.clone(), range.clone());
+        self.grants.loaded(id.clone(), shard.clone(), range.clone());
 
         // Step 3: Wait for activation.
-        if let Err(e) = o.wait_for_active().await {
-            debug!(%id, error = %e, "step 3 bail");
-            return;
+        tokio::select! {
+            biased;
+            _ = closed.closed() => return,
+            result = o.wait_for_active() => if result.is_err() { return; },
         }
         self.grants
             .activate(id.clone(), shard.clone(), range.clone());
 
         // Step 4: Wait for revocation, then drain.
-        let unloader = match o.wait_for_revoke().await {
-            Ok(u) => u,
-            Err(e) => {
-                debug!(%id, error = %e, "step 4 revoke bail");
-                return;
-            }
+        let unloader = tokio::select! {
+            biased;
+            _ = closed.closed() => return,
+            result = o.wait_for_revoke() => match result {
+                Ok(unloader) => unloader,
+                Err(_) => return,
+            },
         };
-        self.grants
-            .revoke(id.clone(), shard.clone(), range.clone());
+        self.grants.revoke(id.clone(), shard.clone(), range.clone());
         let timeout = o
             .expiration()
             .duration_since(SystemTime::now())
             .unwrap_or(Duration::ZERO);
-        let unloaded = range.drain(timeout).await;
+        let unloaded = tokio::select! {
+            biased;
+            _ = closed.closed() => return,
+            _ = o.wait_for_expiration() => return,
+            result = tokio::time::timeout(timeout, range.drain(timeout)) => match result {
+                Ok(unloaded) => unloaded,
+                Err(_) => return,
+            },
+        };
 
         // Step 5: Wait for drain to complete, signal unload, wait for
         // counterpart load.
-        if let Err(e) = o.wait_for_action(unloaded).await {
-            debug!(%id, error = %e, "step 5 drain bail");
-            return;
-        }
-        if range.closed().is_closed() {
-            return;
+        tokio::select! {
+            biased;
+            _ = closed.closed() => return,
+            result = o.wait_for_action(unloaded) => if result.is_err() { return; },
         }
         unloader.unload();
         self.grants
             .unloaded(id.clone(), shard.clone(), range.clone());
-        if let Err(e) = o.wait_for_load().await {
-            debug!(%id, error = %e, "step 5 wait_for_load bail (expected on lease expiry)");
+        tokio::select! {
+            biased;
+            _ = closed.closed() => {},
+            _ = o.wait_for_load() => {},
         }
     }
 }
@@ -201,12 +199,15 @@ struct GrantCleanup<R: Range + ?Sized> {
     id: GrantId,
     grants: Arc<GrantMap<Arc<R>>>,
     range: Arc<R>,
+    ownership: Arc<Ownership>,
 }
 
 impl<R: Range + ?Sized> Drop for GrantCleanup<R> {
     fn drop(&mut self) {
-        self.grants.delete(&self.id);
+        self.grants
+            .delete_if(&self.id, |current| Arc::ptr_eq(current, &self.range));
         self.range.close();
+        self.ownership.release();
     }
 }
 
@@ -345,7 +346,7 @@ mod tests {
     async fn rejecting_factory_returns_false() {
         let p = Processor::new(Arc::new(RejectFactory));
         p.initialized.close();
-        let o = Ownership::new(GrantState::Allocated, far_future());
+        let o = Ownership::new(GrantState::Active, far_future());
         // Note: try_handle takes &self; processor is still borrowed here, that
         // is fine within a single async fn (no task spawn).
         let took = p.try_handle(GrantId("g".into()), mk_shard(), o).await;
@@ -416,10 +417,180 @@ mod tests {
         let took = task.await.expect("task joined");
         assert!(took);
         assert!(p.grants().is_empty());
-        // Range should have been closed by the RAII guard.
-        assert!(
-            log.lock().unwrap().iter().any(|s| s.contains("closed")),
-            "expected range close on expire"
-        );
+        // No application state is created before counterpart unload.
+        assert!(log.lock().unwrap().is_empty());
+    }
+    #[derive(Clone)]
+    struct ControlledRange {
+        initialized: Latch,
+        closed: Latch,
+        draining: Latch,
+        drained: Latch,
+        hang_in_drain: bool,
+    }
+    #[async_trait]
+    impl Range for ControlledRange {
+        fn initialized(&self) -> LatchReader {
+            self.initialized.reader()
+        }
+        fn closed(&self) -> LatchReader {
+            self.closed.reader()
+        }
+        fn close(&self) {
+            self.closed.close();
+        }
+        async fn drain(&self, _: Duration) -> LatchReader {
+            self.draining.close();
+            if self.hang_in_drain {
+                std::future::pending::<()>().await;
+            }
+            self.drained.reader()
+        }
+    }
+    struct ControlledFactory {
+        range: ControlledRange,
+        built: Latch,
+    }
+    impl RangeFactory for ControlledFactory {
+        type Range = ControlledRange;
+        fn build(&self, _: GrantId, _: Shard, _: Arc<Ownership>) -> Option<ControlledRange> {
+            self.built.close();
+            Some(self.range.clone())
+        }
+    }
+    fn controlled(
+        hang_in_drain: bool,
+    ) -> (Arc<Processor<ControlledFactory>>, ControlledRange, Latch) {
+        let range = ControlledRange {
+            initialized: Latch::new(),
+            closed: Latch::new(),
+            draining: Latch::new(),
+            drained: Latch::new(),
+            hang_in_drain,
+        };
+        let built = Latch::new();
+        let processor = Processor::new(Arc::new(ControlledFactory {
+            range: range.clone(),
+            built: built.clone(),
+        }));
+        processor.initialized.close();
+        (processor, range, built)
+    }
+    async fn state(processor: &Processor<ControlledFactory>, expected: GrantState) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !processor
+                .grants
+                .get(&GrantId("g".into()))
+                .is_some_and(|(_, state, _)| state == expected)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn factory_waits_until_previous_owner_unloads() {
+        let (processor, range, built) = controlled(false);
+        let ownership = Ownership::new(GrantState::Allocated, far_future());
+        let p = processor.clone();
+        let o = ownership.clone();
+        let task =
+            tokio::spawn(async move { p.try_handle(GrantId("g".into()), mk_shard(), o).await });
+        tokio::task::yield_now().await;
+        assert!(!built.is_closed());
+        ownership.counterpart_unloaded();
+        tokio::time::timeout(Duration::from_secs(2), built.closed())
+            .await
+            .unwrap();
+        range.close();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn self_close_aborts_every_lifecycle_wait_and_releases_grant() {
+        for phase in 0..5 {
+            let (processor, range, built) = controlled(false);
+            let ownership = Ownership::new(GrantState::Allocated, far_future());
+            ownership.counterpart_unloaded();
+            let p = processor.clone();
+            let o = ownership.clone();
+            let task =
+                tokio::spawn(async move { p.try_handle(GrantId("g".into()), mk_shard(), o).await });
+            tokio::time::timeout(Duration::from_secs(2), built.closed())
+                .await
+                .unwrap();
+            if phase >= 1 {
+                range.initialized.close();
+                state(&processor, GrantState::AllocatedLoaded).await;
+            }
+            if phase >= 2 {
+                ownership.activate();
+                state(&processor, GrantState::Active).await;
+            }
+            if phase >= 3 {
+                ownership.revoke();
+                state(&processor, GrantState::Revoked).await;
+            }
+            if phase >= 4 {
+                range.drained.close();
+                state(&processor, GrantState::RevokedUnloaded).await;
+            }
+            range.close();
+            tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(ownership.released.is_closed());
+            assert!(processor.grants.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn hung_drain_call_is_cancelled_when_lease_expires() {
+        let (processor, range, _) = controlled(true);
+        range.initialized.close();
+        let ownership = Ownership::new(GrantState::Active, far_future());
+        let p = processor.clone();
+        let o = ownership.clone();
+        let task =
+            tokio::spawn(async move { p.try_handle(GrantId("g".into()), mk_shard(), o).await });
+        state(&processor, GrantState::Active).await;
+        ownership.revoke();
+        tokio::time::timeout(Duration::from_secs(2), range.draining.closed())
+            .await
+            .unwrap();
+        ownership.set_expiration(SystemTime::UNIX_EPOCH);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(range.closed.is_closed());
+        assert!(!ownership.unloader.unload.is_closed());
+        assert!(processor.grants.is_empty());
+    }
+
+    #[tokio::test]
+    async fn old_cleanup_cannot_delete_replacement_grant() {
+        let (processor, old, _) = controlled(false);
+        let replacement = Arc::new(controlled(false).1);
+        let id = GrantId("g".into());
+        processor
+            .grants
+            .activate(id.clone(), mk_shard(), replacement.clone());
+        drop(GrantCleanup {
+            id: id.clone(),
+            grants: processor.grants.clone(),
+            range: Arc::new(old),
+            ownership: Ownership::new(GrantState::Active, far_future()),
+        });
+        assert!(Arc::ptr_eq(
+            &processor.grants.get(&id).unwrap().2,
+            &replacement
+        ));
     }
 }

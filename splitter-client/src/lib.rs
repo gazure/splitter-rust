@@ -46,7 +46,9 @@ pub mod session;
 pub mod wrap;
 
 pub use cluster::{ClusterId, ClusterMap, ConsumerEntry, GrantEntry};
-pub use consumer::{ConsumerClient, ConsumerOptions, GrantEvent, JoinHandle};
+pub use consumer::{
+    AssignmentSnapshot, ConsumerClient, ConsumerOptions, GrantAssignment, GrantEvent, JoinHandle,
+};
 pub use dispatcher::{DispatchFilter, Dispatcher, DispatcherBuilder, FilterContext};
 pub use error::{ClientError, Result};
 pub use grant_map::GrantMap;
@@ -59,6 +61,6 @@ pub use latch::{Latch, LatchReader};
 pub use ownership::{Loader, Ownership, Unloader};
 pub use pool::ConnectionPool;
 pub use processor::{Processor, Range, RangeFactory, RecordingRange};
-pub use proxy::{handle, handle_with_retry, Proxy};
+pub use proxy::{Proxy, handle, handle_with_retry};
 pub use resolver::{DomainResolver, RemoteFn};
-pub use retry::{retry_ownership, OwnershipBackoff};
+pub use retry::{OwnershipBackoff, retry_ownership};

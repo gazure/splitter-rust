@@ -13,12 +13,11 @@
 //! Usage:
 //!     cargo run --example join -- <endpoint> <tenant/service> [region] [node]
 
-use std::sync::Arc;
-use std::time::SystemTime;
+use std::{collections::HashMap, sync::Arc, time::SystemTime};
 
 use splitter_client::{
-    ConsumerClient, ConsumerOptions, GrantEvent, GrantId, Instance, InstanceId, Location,
-    Ownership, QualifiedServiceName, Shard,
+    ConsumerClient, ConsumerOptions, GrantId, Instance, InstanceId, Location, Ownership,
+    QualifiedServiceName, Shard,
 };
 use tonic::transport::Channel;
 
@@ -59,10 +58,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let mut cluster = handle.cluster.clone();
-    let mut grants = handle.subscribe_grants();
+    let mut grants = handle.assignments.clone();
+    let mut known: HashMap<GrantId, Arc<Ownership>> = HashMap::new();
+    let mut tasks = tokio::task::JoinSet::new();
     let closed = handle.closed();
 
     loop {
+        let snapshot = grants.borrow_and_update().clone();
+        known.retain(|id, ownership| {
+            snapshot
+                .get(id)
+                .is_some_and(|entry| Arc::ptr_eq(ownership, &entry.ownership))
+        });
+        for (id, assignment) in snapshot.iter() {
+            if !known.contains_key(id) {
+                known.insert(id.clone(), assignment.ownership.clone());
+                tasks.spawn(run_lifecycle(
+                    id.clone(),
+                    assignment.shard.clone(),
+                    assignment.ownership.clone(),
+                ));
+            }
+        }
         tokio::select! {
             res = cluster.changed() => {
                 if res.is_err() { break; }
@@ -75,37 +92,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "cluster update"
                 );
             }
-            evt = grants.recv() => {
-                match evt {
-                    Ok(GrantEvent::Assigned { id, shard, ownership }) => {
-                        tracing::info!(grant = %id, shard = %shard, expiration = ?ownership.expiration(), "grant assigned");
-                        tokio::spawn(run_lifecycle(id, shard, ownership));
-                    }
-                    Ok(GrantEvent::Removed { id }) => {
-                        tracing::info!(grant = %id, "grant removed");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(dropped = n, "grant broadcast lagged");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
+            result = grants.changed() => if result.is_err() { break; },
+            _ = tasks.join_next(), if !tasks.is_empty() => {},
             _ = closed.closed() => {
                 tracing::info!("join closed");
                 break;
             }
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("SIGINT received, draining");
-                handle.shutdown().await?;
+                let result = tokio::time::timeout(std::time::Duration::from_secs(10), handle.shutdown()).await;
+                tasks.shutdown().await;
+                result??;
                 return Ok(());
             }
         }
     }
 
+    tasks.shutdown().await;
     Ok(())
 }
 
+struct Release(Arc<Ownership>);
+impl Drop for Release {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
 async fn run_lifecycle(id: GrantId, shard: Shard, o: Arc<Ownership>) {
+    let _release = Release(o.clone());
     let loader = match o.wait_for_unload().await {
         Ok(l) => l,
         Err(e) => {
