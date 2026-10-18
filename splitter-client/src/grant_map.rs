@@ -8,7 +8,10 @@
 //! Phase 2 scope: per-id writes + lookups. The by-key (domain+shard range)
 //! lookup lives in Phase 4 when the Proxy lands and needs it.
 
-use std::{collections::HashMap, sync::RwLock};
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
 
 use crate::ids::{GrantId, GrantState, Shard};
 
@@ -21,6 +24,59 @@ struct Entry<T> {
 
 pub struct GrantMap<T: Clone> {
     inner: RwLock<HashMap<GrantId, Entry<T>>>,
+}
+
+/// Read-only access to a processor's live grant registry.
+///
+/// Clones observe the same registry. Each method reads the current state;
+/// separate calls do not form an atomic snapshot. Returned values are clones,
+/// so a range handle can outlive its registry entry. The range remains
+/// responsible for its own closure behavior.
+#[derive(Clone)]
+pub struct GrantMapReader<T: Clone> {
+    grants: Arc<GrantMap<T>>,
+}
+
+impl<T: Clone> GrantMapReader<T> {
+    pub(crate) fn new(grants: Arc<GrantMap<T>>) -> Self {
+        Self { grants }
+    }
+
+    /// Returns the shard, state, and cloned value for `id`, if present.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a previous writer poisoned the grant map lock.
+    pub fn get(&self, id: &GrantId) -> Option<(Shard, GrantState, T)> {
+        self.grants.get(id)
+    }
+
+    /// Returns the number of tracked grants.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a previous writer poisoned the grant map lock.
+    pub fn len(&self) -> usize {
+        self.grants.len()
+    }
+
+    /// Returns whether the registry has no grants.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a previous writer poisoned the grant map lock.
+    pub fn is_empty(&self) -> bool {
+        self.grants.is_empty()
+    }
+
+    /// Returns the current grant IDs without holding the registry lock.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a previous writer poisoned the grant map lock.
+    pub fn ids(&self) -> Vec<GrantId> {
+        self.grants.ids()
+    }
 }
 
 impl<T: Clone> Default for GrantMap<T> {
@@ -153,6 +209,29 @@ mod tests {
             from: String::new(),
             to: String::new(),
         }
+    }
+
+    #[test]
+    fn retained_readers_observe_replacement_and_removal() {
+        let grants = Arc::new(GrantMap::new());
+        let reader = GrantMapReader::new(grants.clone());
+        let retained = reader.clone();
+        let id = GrantId::new("g1");
+        assert!(reader.is_empty());
+
+        grants.activate(id.clone(), mk_shard(), "original");
+        let original = reader.get(&id).unwrap();
+        grants.allocated(id.clone(), mk_shard(), "replacement");
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained.ids(), vec![id.clone()]);
+        let (_, state, value) = retained.get(&id).unwrap();
+        assert_eq!(state, GrantState::Allocated);
+        assert_eq!(value, "replacement");
+        assert_eq!(original.2, "original");
+
+        grants.delete(&id);
+        assert!(reader.get(&id).is_none());
+        assert!(retained.is_empty());
     }
 
     #[test]

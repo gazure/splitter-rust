@@ -22,7 +22,7 @@ use tracing::debug;
 
 use crate::{
     dispatcher::{DispatchFilter, FilterContext},
-    grant_map::GrantMap,
+    grant_map::{GrantMap, GrantMapReader},
     ids::{GrantId, Shard},
     latch::{Latch, LatchReader},
     ownership::{Loader, Ownership},
@@ -75,8 +75,32 @@ impl<F: RangeFactory> Processor<F> {
         })
     }
 
-    pub fn grants(&self) -> &Arc<GrantMap<Arc<F::Range>>> {
-        &self.grants
+    /// Returns a cloneable, read-only handle to the live range registry.
+    ///
+    /// Callers can inspect and retrieve ranges but cannot remove entries:
+    ///
+    /// ```compile_fail
+    /// use splitter_client::{GrantId, Processor, RangeFactory};
+    ///
+    /// fn remove<F: RangeFactory>(processor: &Processor<F>, id: &GrantId) {
+    ///     processor.grants().delete(id);
+    /// }
+    /// ```
+    ///
+    /// Only the processor can publish a range as active:
+    ///
+    /// ```compile_fail
+    /// use std::sync::Arc;
+    /// use splitter_client::{GrantId, Processor, RangeFactory, Shard};
+    ///
+    /// fn activate<F: RangeFactory>(
+    ///     processor: &Processor<F>, id: GrantId, shard: Shard, range: Arc<F::Range>,
+    /// ) {
+    ///     processor.grants().activate(id, shard, range);
+    /// }
+    /// ```
+    pub fn grants(&self) -> GrantMapReader<Arc<F::Range>> {
+        GrantMapReader::new(self.grants.clone())
     }
 }
 

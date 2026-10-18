@@ -52,7 +52,7 @@ pub use consumer::{
 };
 pub use dispatcher::{DispatchFilter, Dispatcher, DispatcherBuilder, FilterContext};
 pub use error::{ClientError, Result};
-pub use grant_map::GrantMap;
+pub use grant_map::{GrantMap, GrantMapReader};
 pub use ids::{
     ConsumerId, DomainKey, DomainKeyName, DomainName, DomainType, Endpoint, GrantId, GrantState,
     Instance, InstanceId, InstanceName, Location, NodeName, QualifiedDomainKey,
