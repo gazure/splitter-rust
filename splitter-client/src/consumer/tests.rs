@@ -47,7 +47,7 @@ fn grant(id: &str, state: pb::GrantState) -> pb::Grant {
                     name: "ranges".into(),
                 },
                 kind: DomainType::Global,
-                region: Default::default(),
+                region: crate::ids::Region::default(),
                 from: String::new(),
                 to: String::new(),
             }

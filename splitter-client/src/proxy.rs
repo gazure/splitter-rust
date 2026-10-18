@@ -173,7 +173,7 @@ mod tests {
                     name: "d".into(),
                 },
                 key: DomainKey {
-                    region: Default::default(),
+                    region: crate::ids::Region::default(),
                     key: key.to_string(),
                 },
             }
@@ -227,7 +227,7 @@ mod tests {
                     assert_eq!(states, &[GrantState::Active]);
                     None
                 } else {
-                    assert!(states.is_empty());
+                    assert_eq!(states, []);
                     Some(5)
                 }
             },

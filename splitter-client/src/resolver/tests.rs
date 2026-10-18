@@ -30,7 +30,7 @@ fn cluster(owners: &[(&Instance, pb::GrantState)]) -> Arc<ClusterMap> {
     let shard: pb::Shard = Shard {
         domain: key().domain,
         kind: DomainType::Unit,
-        region: Default::default(),
+        region: crate::ids::Region::default(),
         from: String::new(),
         to: String::new(),
     }
@@ -162,8 +162,8 @@ async fn missing_owner_does_not_invoke_non_active_local_handler() {
         &proxy,
         &key(),
         (),
-        |_, _| async { panic!("no remote owner") },
-        |_, _| async { Ok::<(), ClientError>(()) },
+        |(), ()| async { panic!("no remote owner") },
+        |(), ()| async { Ok::<(), ClientError>(()) },
     )
     .await;
     assert!(matches!(result, Err(ClientError::NotOwned)));
@@ -180,8 +180,8 @@ async fn known_local_owner_still_invokes_local_fallback() {
         &proxy,
         &key(),
         (),
-        |_, _| async { panic!("owner is local") },
-        |_, _| async { Ok::<_, ClientError>(42) },
+        |(), ()| async { panic!("owner is local") },
+        |(), ()| async { Ok::<_, ClientError>(42) },
     )
     .await;
     assert_eq!(result.unwrap(), 42);
@@ -199,8 +199,8 @@ async fn unavailable_peer_retries_until_pool_catches_up() {
             &key(),
             std::time::Duration::from_secs(5),
             (),
-            |_, _| async { Ok(42) },
-            |_, _| async { panic!("missing remote peer must not invoke local fallback") },
+            |(), ()| async { Ok(42) },
+            |(), ()| async { panic!("missing remote peer must not invoke local fallback") },
         )
         .await
     });

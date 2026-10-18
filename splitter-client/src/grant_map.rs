@@ -36,6 +36,11 @@ impl<T: Clone> GrantMap<T> {
         }
     }
 
+    /// Writes the shard, state, and value for a grant, replacing any previous entry.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a previous writer poisoned the grant map lock.
     pub fn write(&self, id: GrantId, shard: Shard, state: GrantState, value: T) {
         let mut m = self.inner.write().expect("grant map poisoned");
         m.insert(
@@ -64,6 +69,11 @@ impl<T: Clone> GrantMap<T> {
         self.write(id, shard, GrantState::RevokedUnloaded, value);
     }
 
+    /// Removes a grant and returns its shard, state, and value, if present.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a previous writer poisoned the grant map lock.
     pub fn delete(&self, id: &GrantId) -> Option<(Shard, GrantState, T)> {
         let mut m = self.inner.write().expect("grant map poisoned");
         m.remove(id).map(|e| (e.shard, e.state, e.value))
@@ -73,6 +83,10 @@ impl<T: Clone> GrantMap<T> {
     ///
     /// The predicate runs under the write lock. It must not access this map.
     /// Returns the removed entry, or `None` if the entry changed or is absent.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a previous writer poisoned the grant map lock.
     pub fn delete_if(
         &self,
         id: &GrantId,
@@ -88,12 +102,21 @@ impl<T: Clone> GrantMap<T> {
     }
 
     /// Fetch a value by grant id. Returns `(shard, state, value)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a previous writer poisoned the grant map lock.
     pub fn get(&self, id: &GrantId) -> Option<(Shard, GrantState, T)> {
         let m = self.inner.read().expect("grant map poisoned");
         m.get(id)
             .map(|e| (e.shard.clone(), e.state, e.value.clone()))
     }
 
+    /// Returns the number of tracked grants.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a previous writer poisoned the grant map lock.
     pub fn len(&self) -> usize {
         self.inner.read().expect("grant map poisoned").len()
     }
@@ -104,6 +127,10 @@ impl<T: Clone> GrantMap<T> {
 
     /// Snapshot of all grant ids currently tracked, cloned out under the read
     /// lock so the caller can iterate without holding it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a previous writer poisoned the grant map lock.
     pub fn ids(&self) -> Vec<GrantId> {
         let m = self.inner.read().expect("grant map poisoned");
         m.keys().cloned().collect()
@@ -122,7 +149,7 @@ mod tests {
                 name: "d".into(),
             },
             kind: DomainType::Global,
-            region: Default::default(),
+            region: crate::ids::Region::default(),
             from: String::new(),
             to: String::new(),
         }

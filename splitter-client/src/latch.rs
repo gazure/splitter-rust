@@ -57,7 +57,7 @@ impl Latch {
     }
 
     pub async fn closed(&self) {
-        self.reader().closed().await
+        self.reader().closed().await;
     }
 }
 

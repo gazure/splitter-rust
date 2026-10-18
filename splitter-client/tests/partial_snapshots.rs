@@ -264,7 +264,10 @@ fn replay_then_activation_evicts_retained_revoked_grant() {
     );
     assert_eq!(active.grants.len(), 1);
     assert_owner(&active, "1", &new, "new");
-    assert!(active.consumers[&old.id].grants.is_empty());
+    assert_eq!(
+        active.consumers[&old.id].grants,
+        [] as [splitter_client::GrantId; 0]
+    );
     assert_consistent(&active);
 }
 
@@ -418,6 +421,9 @@ fn unassign_drops_reported_grant_but_preserves_omitted_peer_and_idle_consumer() 
     );
     assert_eq!(next.grants.len(), 1);
     assert_owner(&next, "b", &owner, "b");
-    assert!(next.consumers[&idle.id].grants.is_empty());
+    assert_eq!(
+        next.consumers[&idle.id].grants,
+        [] as [splitter_client::GrantId; 0]
+    );
     assert_consistent(&next);
 }

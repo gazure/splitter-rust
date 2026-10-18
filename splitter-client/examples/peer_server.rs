@@ -9,7 +9,9 @@
 //! plumbing is visible.
 //!
 //! Usage:
-//!     cargo run --example peer_server -- <endpoint> <tenant/service> [peer_port] [region] [node]
+//! ```sh
+//! cargo run --example peer_server -- <endpoint> <tenant/service> [peer_port] [region] [node]
+//! ```
 
 use std::{
     net::SocketAddr,

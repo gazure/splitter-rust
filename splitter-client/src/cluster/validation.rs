@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    ClientError, ClusterMap, ClusterMessage, GrantId, GrantState, HashMap, HashSet, Instance,
+    InstanceId, Shard, cluster_message, grant_state_from_i32, grant_states_compatible,
+};
 
 type Grants = HashMap<GrantId, (Shard, GrantState)>;
 
@@ -166,7 +169,7 @@ fn check_state(states: &[GrantState], next: GrantState) -> Result<(), ClientErro
 }
 
 fn state_can_advance(old: GrantState, next: GrantState) -> bool {
-    use GrantState::*;
+    use GrantState::{Active, Allocated, AllocatedLoaded, Revoked, RevokedUnloaded, Unknown};
     match old {
         Allocated => next != Allocated,
         AllocatedLoaded => !matches!(next, Allocated | AllocatedLoaded),

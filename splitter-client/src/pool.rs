@@ -103,6 +103,10 @@ impl ConnectionPool {
     /// Returns `NoResolution` for this instance and retryable `Unavailable` for missing peers.
     /// Retries failed channel construction after the one-second backoff, even
     /// without another cluster update.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a previous writer poisoned the connection pool lock.
     pub fn resolve(&self, id: &InstanceId) -> Result<Channel, ClientError> {
         if id == &self.self_id {
             return Err(ClientError::NoResolution);
@@ -129,6 +133,10 @@ impl ConnectionPool {
     /// Endpoint changes discard the previous channel before dialing the new endpoint.
     /// Failed construction is retried by later updates or lookups, at most once
     /// per second for the same endpoint.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a previous writer poisoned the connection pool lock.
     pub fn apply_cluster(&self, cluster: &ClusterMap) {
         let mut seen = HashSet::new();
         let mut entries = self.entries.write().expect("pool poisoned");
@@ -151,6 +159,10 @@ impl ConnectionPool {
     }
 
     /// Returns the number of peers with constructed channels, excluding pending retries.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a previous writer poisoned the connection pool lock.
     pub fn len(&self) -> usize {
         self.entries
             .read()

@@ -6,9 +6,10 @@
 //!   package in session.proto is `atoms.splitter.lib.service.service`).
 //! - `atoms::splitter::lib::service::location` — Location/Instance types.
 
-#![allow(clippy::all)]
 #![allow(rustdoc::invalid_rust_codeblocks)]
 
+// Prost and tonic generate the contents of this module.
+#[allow(clippy::all, clippy::pedantic)]
 pub mod atoms {
     pub mod splitter {
         tonic::include_proto!("atoms.splitter");

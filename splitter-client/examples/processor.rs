@@ -61,7 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         location: Location::new(region, node),
         name: "splitter-rs/processor-example".into(),
         created: SystemTime::now(),
-        endpoint: Default::default(),
+        endpoint: splitter_client::Endpoint::default(),
     };
 
     let log = Arc::new(Mutex::new(Vec::new()));

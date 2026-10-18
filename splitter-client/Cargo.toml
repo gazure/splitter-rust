@@ -28,3 +28,6 @@ splitter-peer = { path = "../splitter-peer" }
 [[example]]
 name = "join"
 path = "examples/join.rs"
+
+[lints]
+workspace = true
