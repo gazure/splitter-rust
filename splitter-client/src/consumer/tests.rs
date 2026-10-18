@@ -7,6 +7,7 @@ use tokio::time::timeout;
 
 mod cluster;
 mod deadline;
+mod expired_assignments;
 mod initial_join;
 mod live_promotions;
 mod promotion;
