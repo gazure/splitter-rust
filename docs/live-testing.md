@@ -23,12 +23,20 @@ port. The harness then creates these isolated fixtures:
 | Service | Domain | Purpose |
 | --- | --- | --- |
 | `rust-client/ranges` | `entities`, GLOBAL, four shards | Join, shutdown, and two-consumer handover |
-| `rust-client/unit` | `leader`, UNIT | Routing from a real server snapshot |
+| `rust-client/unit` | `leader`, UNIT | Routing and delayed promotion recovery |
 
-The five live tests run serially on the host against the published gRPC endpoint.
+The six live tests run serially on the host against the published gRPC endpoint.
 They cover initial cluster delivery, missing-service rejection, shutdown,
-two-consumer rebalance and drain, and UNIT-domain lookup. Ordinary `cargo test`
-keeps these tests ignored; explicitly running them without configuration fails.
+two-consumer rebalance and drain, UNIT-domain lookup, and rejected promotions.
+Ordinary `cargo test` keeps these tests ignored; explicitly running them without
+configuration fails.
+
+The promotion test holds a real coordinator promotion at the receiving client's
+transport boundary, moves the local lease deadline into the past, and waits for
+local ownership to expire before delivering the message. It then checks that the
+coordinator removes the rejected grant from its routing view while the session
+remains connected. This injects the race deterministically without waiting for
+the server's full lease duration.
 
 ## Options and diagnostics
 
@@ -67,12 +75,19 @@ requires a local Docker daemon because Rust tests connect through host loopback.
 This deployment exercises the real Go coordinator, Raft storage, gRPC transport,
 and Rust lifecycle handlers. It does not test multi-node Raft failover, network
 partitions, application-state durability, or application RPCs between consumers.
-The deterministic in-memory tests remain responsible for scripted lifecycle
-races and transport failures.
+The deterministic in-memory tests cover additional lifecycle races and transport
+failures.
 
 To use an existing server instead, follow the provisioning commands at the top
 of [e2e.rs](../splitter-client/tests/e2e.rs). Use dedicated services with no other
 consumers attached.
+
+To run only the delayed-promotion test against a provisioned UNIT service, set
+`SPLITTER_ENDPOINT`, `SPLITTER_UNIT_SERVICE`, and `SPLITTER_REGION`, then run:
+
+```sh
+cargo test -p splitter-client --lib live_delayed_promotion -- --ignored --nocapture
+```
 
 Runner tests exercise provisioning, failure propagation, log capture, and cleanup
 with a simulated Docker CLI:
