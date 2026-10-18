@@ -85,10 +85,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if res.is_err() { break; }
                 let snap = cluster.borrow_and_update();
                 tracing::info!(
-                    version = snap.id.version,
-                    consumers = snap.consumers.len(),
-                    grants = snap.grants.len(),
-                    shards = snap.shards.len(),
+                    version = snap.id().version,
+                    consumers = snap.consumers().len(),
+                    grants = snap.grants().len(),
+                    shards = snap.shards().len(),
                     "cluster update"
                 );
             }

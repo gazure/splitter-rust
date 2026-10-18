@@ -163,8 +163,10 @@ mutable `GrantMap`.
 
 `Range` and `RangeFactory` signatures are unchanged. Direct `ConsumerOptions`
 struct literals need the `reconnect` and `join_timeout` fields, or `..Default::default()`.
-Construct cluster maps with `ClusterMap::empty()` and `apply()`; private retention
-metadata prevents direct `ClusterMap` struct literals.
+Construct cluster maps with `ClusterMap::empty()` and validated `apply()` updates.
+Read metadata and routing entries through `id()`, `consumers()`, `grants()`, and
+`shards()`. All snapshot fields are private, including retention metadata, so
+callers cannot edit relationships or advance versions outside validation.
 Dropping a Join handle now cancels its driver, so retain the handle for the desired
 session lifetime. The lockfile updates Tokio to 1.53.1 and `async-trait` to 0.1.92;
 the latter avoids a generated `double_must_use` lint on the installed nightly.

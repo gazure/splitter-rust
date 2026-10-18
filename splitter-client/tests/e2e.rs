@@ -84,7 +84,7 @@ async fn join_receives_initial_cluster_update() {
     let mut cluster = handle.cluster.clone();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if cluster.borrow_and_update().id.version > 0 {
+            if cluster.borrow_and_update().id().version > 0 {
                 break;
             }
             cluster
@@ -231,7 +231,7 @@ async fn unit_domain_routes_keys_from_live_cluster_snapshot() {
                 .any(|shard| shard.kind == DomainType::Unit && shard.domain == domain)
                 && dispatcher
                     .cluster()
-                    .grants
+                    .grants()
                     .values()
                     .any(|grant| grant.shard.domain == domain && grant.state == GrantState::Active)
         },

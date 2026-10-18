@@ -56,7 +56,7 @@ fn assert_peer_route(cluster: &ClusterMap) {
         .expect("peer route must survive recovery");
     assert_eq!(owner.id.as_str(), "peer-grant");
     assert_eq!(
-        cluster.consumers[&owner.consumer]
+        cluster.consumers()[&owner.consumer]
             .consumer
             .endpoint
             .as_str(),
@@ -97,11 +97,11 @@ async fn reconnect_preserves_routes_until_partial_snapshot_and_clears_on_close()
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     assert_peer_route(&h.handle.cluster.borrow());
     h.driver.handle_inbound(snapshot(false)).await.unwrap();
-    assert_eq!(h.handle.cluster.borrow().id.version, 2);
+    assert_eq!(h.handle.cluster.borrow().id().version, 2);
     assert_peer_route(&h.handle.cluster.borrow());
     drop(h.driver);
-    assert!(h.handle.cluster.borrow().grants.is_empty());
-    assert!(h.handle.cluster.borrow().consumers.is_empty());
+    assert!(h.handle.cluster.borrow().grants().is_empty());
+    assert!(h.handle.cluster.borrow().consumers().is_empty());
     assert!(h.handle.closed().is_closed());
 }
 
@@ -129,15 +129,15 @@ async fn failed_recovery_clears_retained_routes() {
         Err(ClientError::SessionClosed(_))
     ));
     assert!(h.handle.closed().is_closed());
-    assert!(h.handle.cluster.borrow().grants.is_empty());
-    assert!(h.handle.cluster.borrow().consumers.is_empty());
+    assert!(h.handle.cluster.borrow().grants().is_empty());
+    assert!(h.handle.cluster.borrow().consumers().is_empty());
 }
 
 fn incremental(cluster: &ClusterMap, version: i64) -> JoinMessage {
     JoinMessage {
         msg: Some(join_message::Msg::Consumer(ConsumerMessage {
             msg: Some(consumer_message::Msg::Cluster(pb::ClusterMessage {
-                id: cluster.id.origin.as_ref().unwrap().id.to_string(),
+                id: cluster.id().origin.as_ref().unwrap().id.to_string(),
                 version,
                 msg: Some(cm::Msg::Change(cm::Change::default())),
                 ..Default::default()
@@ -167,7 +167,7 @@ async fn invalid_cluster_update_preserves_map_and_requires_snapshot() {
         .handle_inbound(incremental(&repaired, 3))
         .await
         .unwrap();
-    assert_eq!(h.handle.cluster.borrow().id.version, 3);
+    assert_eq!(h.handle.cluster.borrow().id().version, 3);
     assert_peer_route(&h.handle.cluster.borrow());
 }
 
@@ -204,7 +204,7 @@ async fn invalid_cluster_update_reconnects_and_accepts_fresh_snapshot() {
         .unwrap();
     h.handle.task = Some(tokio::spawn(h.driver.run()));
     timeout(Duration::from_secs(5), async {
-        while h.handle.cluster.borrow().id.version != 2 {
+        while h.handle.cluster.borrow().id().version != 2 {
             h.handle.cluster.changed().await.unwrap();
         }
     })
@@ -229,7 +229,7 @@ async fn invalid_cluster_update_without_recovery_closes_and_clears_routes() {
         Err(ClientError::InvalidCluster(_))
     ));
     assert!(h.handle.closed().is_closed());
-    assert!(h.handle.cluster.borrow().grants.is_empty());
+    assert!(h.handle.cluster.borrow().grants().is_empty());
 }
 
 #[tokio::test(start_paused = true)]
@@ -262,5 +262,5 @@ async fn cluster_recovery_requires_snapshot_within_total_recovery_budget() {
     let error = h.driver.run().await.unwrap_err();
     assert!(matches!(error, ClientError::SessionClosed(ref s) if s == "cluster recovery timeout"));
     assert_eq!(start.elapsed(), Duration::from_secs(3));
-    assert!(h.handle.cluster.borrow().grants.is_empty());
+    assert!(h.handle.cluster.borrow().grants().is_empty());
 }

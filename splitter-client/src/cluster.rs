@@ -44,17 +44,48 @@ pub struct ConsumerEntry {
     pub grants: Vec<GrantId>,
 }
 
+/// Validated cluster snapshot with read-only metadata and routing entries.
+///
+/// Constructs an empty view with [`Self::empty`] and derives a new snapshot
+/// through [`Self::apply`]. Updating a snapshot never mutates earlier snapshots.
+///
+/// Direct edits cannot bypass validation:
+///
+/// ```compile_fail
+/// use splitter_client::ClusterMap;
+/// let mut cluster = ClusterMap::empty();
+/// cluster.id.version = 10;
+/// ```
+///
+/// ```compile_fail
+/// use splitter_client::ClusterMap;
+/// let mut cluster = ClusterMap::empty();
+/// cluster.consumers.clear();
+/// ```
+///
+/// ```compile_fail
+/// use splitter_client::ClusterMap;
+/// let mut cluster = ClusterMap::empty();
+/// cluster.grants.clear();
+/// ```
+///
+/// ```compile_fail
+/// use splitter_client::ClusterMap;
+/// let mut cluster = ClusterMap::empty();
+/// cluster.shards.clear();
+/// ```
 #[derive(Clone, Debug)]
 pub struct ClusterMap {
-    pub id: ClusterId,
-    pub consumers: HashMap<ConsumerId, ConsumerEntry>,
-    pub grants: HashMap<GrantId, GrantEntry>,
-    pub shards: Vec<Shard>,
+    id: ClusterId,
+    consumers: HashMap<ConsumerId, ConsumerEntry>,
+    grants: HashMap<GrantId, GrantEntry>,
+    shards: Vec<Shard>,
     retained_grants: HashSet<GrantId>,
     retained_consumers: HashSet<ConsumerId>,
 }
 
 impl ClusterMap {
+    /// Returns an empty snapshot without a coordinator origin.
     pub fn empty() -> Self {
         Self {
             id: ClusterId {
@@ -68,6 +99,50 @@ impl ClusterMap {
             retained_grants: HashSet::new(),
             retained_consumers: HashSet::new(),
         }
+    }
+
+    /// Returns the coordinator origin, version, and timestamp without mutation access.
+    ///
+    /// ```compile_fail
+    /// use splitter_client::ClusterMap;
+    /// let mut cluster = ClusterMap::empty();
+    /// cluster.id().version = 10;
+    /// ```
+    pub fn id(&self) -> &ClusterId {
+        &self.id
+    }
+
+    /// Returns the consumers and their grant IDs without mutation access.
+    ///
+    /// ```compile_fail
+    /// use splitter_client::ClusterMap;
+    /// let mut cluster = ClusterMap::empty();
+    /// cluster.consumers().clear();
+    /// ```
+    pub fn consumers(&self) -> &HashMap<ConsumerId, ConsumerEntry> {
+        &self.consumers
+    }
+
+    /// Returns the routing grants without mutation access.
+    ///
+    /// ```compile_fail
+    /// use splitter_client::ClusterMap;
+    /// let mut cluster = ClusterMap::empty();
+    /// cluster.grants().clear();
+    /// ```
+    pub fn grants(&self) -> &HashMap<GrantId, GrantEntry> {
+        &self.grants
+    }
+
+    /// Returns the configured shards without mutation access.
+    ///
+    /// ```compile_fail
+    /// use splitter_client::ClusterMap;
+    /// let mut cluster = ClusterMap::empty();
+    /// cluster.shards().fill_with(|| panic!("cannot replace shards"));
+    /// ```
+    pub fn shards(&self) -> &[Shard] {
+        &self.shards
     }
 
     /// Apply a server-sent `ClusterMessage` to produce a new snapshot.

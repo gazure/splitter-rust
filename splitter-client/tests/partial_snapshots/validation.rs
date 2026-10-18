@@ -16,8 +16,8 @@ fn initial() -> (ClusterMap, Instance, pb::Shard) {
 
 fn delta(map: &ClusterMap, change: cm::Change) -> ClusterMessage {
     ClusterMessage {
-        id: map.id.origin.as_ref().unwrap().id.to_string(),
-        version: map.id.version + 1,
+        id: map.id().origin.as_ref().unwrap().id.to_string(),
+        version: map.id().version + 1,
         msg: Some(cm::Msg::Change(change)),
         ..Default::default()
     }
@@ -39,7 +39,7 @@ fn rejected(map: &ClusterMap, message: ClusterMessage) {
 #[test]
 fn rejects_wrong_origin_stale_duplicate_skipped_and_overflowed_versions() {
     let (map, _, _) = initial();
-    for version in [0, map.id.version, map.id.version + 2] {
+    for version in [0, map.id().version, map.id().version + 2] {
         let mut message = delta(&map, cm::Change::default());
         message.version = version;
         rejected(&map, message);
@@ -47,8 +47,16 @@ fn rejects_wrong_origin_stale_duplicate_skipped_and_overflowed_versions() {
     let mut message = delta(&map, cm::Change::default());
     message.id = InstanceId::new().to_string();
     rejected(&map, message);
-    let mut overflow = map.clone();
-    overflow.id.version = i64::MAX;
+    let overflow = map
+        .apply(ClusterMessage {
+            version: i64::MAX,
+            msg: Some(cm::Msg::Snapshot(cm::Snapshot {
+                origin: map.id().origin.clone().map(Into::into),
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
+        .unwrap();
     let mut message = delta(&map, cm::Change::default());
     message.version = i64::MIN;
     rejected(&overflow, message);
@@ -239,8 +247,8 @@ fn empty_assignment_confirms_consumer_but_not_its_retained_grants() {
             ..Default::default()
         },
     );
-    assert!(removed.grants.is_empty());
-    assert!(removed.consumers.is_empty());
+    assert!(removed.grants().is_empty());
+    assert!(removed.consumers().is_empty());
 }
 
 #[test]
@@ -284,7 +292,7 @@ fn rejects_conflicts_with_confirmed_grants_but_allows_atomic_handover() {
             ..Default::default()
         },
     );
-    assert_eq!(moved.grants.len(), 2);
+    assert_eq!(moved.grants().len(), 2);
     assert_owner(&moved, "a", &owner, "g");
 }
 
@@ -314,9 +322,9 @@ fn promotion_evicts_previously_confirmed_revoked_grant() {
         },
     );
     assert_owner(&promoted, "a", &new, "new");
-    assert_eq!(promoted.grants.len(), 1);
+    assert_eq!(promoted.grants().len(), 1);
     assert_eq!(
-        promoted.consumers[&old.id].grants,
+        promoted.consumers()[&old.id].grants,
         [] as [splitter_client::GrantId; 0]
     );
     assert_consistent(&promoted);
