@@ -249,7 +249,7 @@ impl QualifiedServiceName {
     ///
     /// if cannot parse
     pub fn must_parse(s: &str) -> Self {
-        Self::parse(s).expect(&format!("Could not parse as service name: {}", s))
+        Self::parse(s).unwrap_or_else(|| panic!("Could not parse as service name: {s}"))
     }
 }
 
