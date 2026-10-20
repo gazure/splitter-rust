@@ -5,6 +5,11 @@
 //! Usage:
 //!     cargo run --example processor -- <endpoint> <tenant/service> [region] [node]
 
+#[path = "../support/recording_range.rs"]
+mod recording_range;
+
+use recording_range::RecordingRange;
+
 use std::{
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
@@ -12,7 +17,7 @@ use std::{
 
 use splitter_client::{
     DispatcherBuilder, GrantId, Instance, InstanceId, Location, Ownership, Processor,
-    QualifiedServiceName, RangeFactory, Shard, processor::RecordingRange,
+    QualifiedServiceName, RangeFactory, Shard,
 };
 use tonic::transport::Channel;
 

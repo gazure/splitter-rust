@@ -26,13 +26,13 @@ use splitter_proto::{
 use crate::wrap::{now_timestamp, timestamp_to_system_time};
 
 /// Events extracted from an inbound session frame.
-pub enum SessionEvent {
+pub(crate) enum SessionEvent {
     Established { ttl: SystemTime },
     HeartbeatAck { ttl: SystemTime },
     Closed { error: String },
 }
 
-pub fn classify(msg: &session_pb::Message) -> Option<SessionEvent> {
+pub(crate) fn classify(msg: &session_pb::Message) -> Option<SessionEvent> {
     use session_pb::message::Request;
     match msg.request.as_ref()? {
         Request::Established(e) => e.ttl.as_ref().map(|t| SessionEvent::Established {
@@ -48,7 +48,7 @@ pub fn classify(msg: &session_pb::Message) -> Option<SessionEvent> {
     }
 }
 
-pub fn establish_frame(client: location_pb::Instance, session_id: String) -> JoinMessage {
+pub(crate) fn establish_frame(client: location_pb::Instance, session_id: String) -> JoinMessage {
     wrap(session_pb::message::Request::Establish(
         session_pb::message::Establish {
             client: Some(client),
@@ -57,7 +57,7 @@ pub fn establish_frame(client: location_pb::Instance, session_id: String) -> Joi
     ))
 }
 
-pub fn heartbeat_frame() -> JoinMessage {
+pub(crate) fn heartbeat_frame() -> JoinMessage {
     wrap(session_pb::message::Request::Heartbeat(
         session_pb::message::Heartbeat {
             now: Some(now_timestamp()),
@@ -65,7 +65,7 @@ pub fn heartbeat_frame() -> JoinMessage {
     ))
 }
 
-pub fn closed_frame(error: impl Into<String>) -> JoinMessage {
+pub(crate) fn closed_frame(error: impl Into<String>) -> JoinMessage {
     wrap(session_pb::message::Request::Closed(
         session_pb::message::Closed {
             error: error.into(),
@@ -84,7 +84,7 @@ fn wrap(req: session_pb::message::Request) -> JoinMessage {
 /// Given a lease expiration, compute when to next send a heartbeat.
 /// Returns a duration from `now`. Bounded to at least 250ms so the loop
 /// doesn't spin on a stale ttl, and at most 30s as a sanity ceiling.
-pub fn heartbeat_delay(ttl: SystemTime, now: SystemTime) -> Duration {
+pub(crate) fn heartbeat_delay(ttl: SystemTime, now: SystemTime) -> Duration {
     let remaining = ttl.duration_since(now).unwrap_or(Duration::ZERO);
     let third = remaining / 3;
     third.clamp(Duration::from_millis(250), Duration::from_secs(30))

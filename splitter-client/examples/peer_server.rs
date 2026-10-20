@@ -13,6 +13,11 @@
 //! cargo run --example peer_server -- <endpoint> <tenant/service> [peer_port] [region] [node]
 //! ```
 
+#[path = "../support/recording_range.rs"]
+mod recording_range;
+
+use recording_range::RecordingRange;
+
 use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
@@ -21,7 +26,7 @@ use std::{
 
 use splitter_client::{
     DispatcherBuilder, GrantId, Instance, InstanceId, Location, Ownership, Processor,
-    QualifiedServiceName, RangeFactory, Shard, processor::RecordingRange,
+    QualifiedServiceName, RangeFactory, Shard,
 };
 use splitter_peer::PeerServerBuilder;
 use tonic::transport::{Channel, Server};

@@ -20,6 +20,11 @@
 //! environment settings and a reachable server; missing setup never passes.
 //! They exercise lifecycle convergence, not application-state durability.
 
+#[path = "../support/recording_range.rs"]
+mod recording_range;
+
+use recording_range::RecordingRange;
+
 use std::{
     collections::HashSet,
     sync::{Arc, Mutex},
@@ -29,8 +34,7 @@ use std::{
 use splitter_client::{
     ConsumerClient, ConsumerOptions, Dispatcher, DispatcherBuilder, DomainKey, DomainType,
     Endpoint, GrantId, GrantState, Instance, InstanceId, Location, Ownership, Processor,
-    QualifiedDomainKey, QualifiedDomainName, QualifiedServiceName, RangeFactory, RecordingRange,
-    Shard,
+    QualifiedDomainKey, QualifiedDomainName, QualifiedServiceName, RangeFactory, Shard,
 };
 use tonic::transport::Channel;
 
