@@ -19,6 +19,7 @@ use splitter_proto::pb::{
 };
 use std::{
     collections::HashMap,
+    future::Future,
     pin::Pin,
     sync::Arc,
     time::{Duration, SystemTime},
@@ -31,13 +32,23 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
-/// Bounded Join-session recovery. Existing grants retain only their current leases.
+/// Reconnection policy. Grants retain only their existing leases during outages.
 #[derive(Clone, Debug)]
 pub struct ReconnectOptions {
-    /// Maximum duration of one disconnect episode, including connection attempts.
-    pub timeout: Duration,
+    /// Maximum continuous disconnect before draining. `None` retries indefinitely.
+    /// Includes connection attempts and receipt of a valid cluster snapshot.
+    pub timeout: Option<Duration>,
     /// Delay between connection attempts. Must be nonzero.
     pub backoff: Duration,
+}
+
+impl Default for ReconnectOptions {
+    fn default() -> Self {
+        Self {
+            timeout: None,
+            backoff: Duration::from_secs(1),
+        }
+    }
 }
 
 /// User-facing options for `ConsumerClient::join`.
@@ -46,11 +57,15 @@ pub struct ReconnectOptions {
 pub struct ConsumerOptions {
     pub key_names: Vec<DomainKeyName>,
     pub capacity_limit: u64,
-    /// Maximum duration of the initial Join RPC, including connection setup.
-    /// Defaults to 30 seconds. Must be nonzero.
+    /// Maximum duration of each connection attempt, including session establishment
+    /// when reconnecting. Defaults to 30 seconds. Must be nonzero.
     pub join_timeout: Duration,
-    /// If set, retry transient stream failures or session expiration and replay unexpired grants.
-    /// Explicit session closure and permanent RPC errors remain terminal.
+    /// Maximum graceful drain duration before remaining grants are force-closed.
+    /// Applies to explicit shutdown and disconnect timeout. Defaults to 30 seconds.
+    pub drain_timeout: Duration,
+    /// Retries session failures by default, including initial connection failures,
+    /// RPC rejection, server closure, and invalid protocol messages.
+    /// Set to `None` to return initial connection errors and stop on session failure.
     pub reconnect: Option<ReconnectOptions>,
 }
 
@@ -60,13 +75,14 @@ impl Default for ConsumerOptions {
             key_names: Vec::new(),
             capacity_limit: 0,
             join_timeout: Duration::from_secs(30),
-            reconnect: None,
+            drain_timeout: Duration::from_secs(30),
+            reconnect: Some(ReconnectOptions::default()),
         }
     }
 }
 
 impl ConsumerOptions {
-    /// Sets the initial Join RPC timeout. Zero durations are rejected by `join`.
+    /// Sets the per-attempt connection timeout. Zero durations are rejected by `join`.
     pub fn with_join_timeout(mut self, timeout: Duration) -> Self {
         self.join_timeout = timeout;
         self
@@ -80,9 +96,28 @@ impl ConsumerOptions {
         self.capacity_limit = limit;
         self
     }
-    /// Enables bounded recovery with `options`. Zero durations are rejected by `join`.
+    /// Configures recovery. Zero or unrepresentable durations are rejected by `join`.
     pub fn with_reconnect(mut self, options: ReconnectOptions) -> Self {
         self.reconnect = Some(options);
+        self
+    }
+    /// Stops retrying after `timeout` without a valid cluster snapshot, then drains.
+    pub fn with_disconnect_timeout(mut self, timeout: Duration) -> Self {
+        self.reconnect
+            .get_or_insert_with(ReconnectOptions::default)
+            .timeout = Some(timeout);
+        self
+    }
+
+    /// Sets the maximum graceful shutdown duration, including offline drain.
+    pub fn with_drain_timeout(mut self, timeout: Duration) -> Self {
+        self.drain_timeout = timeout;
+        self
+    }
+
+    /// Disables recovery and returns initial connection errors directly from `join`.
+    pub fn without_reconnect(mut self) -> Self {
+        self.reconnect = None;
         self
     }
 }
@@ -112,7 +147,7 @@ pub enum GrantEvent {
     },
 }
 
-/// Handle to a running Join stream. Dropping it force-stops the driver.
+/// Handle to a running consumer. Dropping it force-stops the driver.
 pub struct JoinHandle {
     pub cluster: watch::Receiver<Arc<ClusterMap>>,
     pub grants: broadcast::Receiver<GrantEvent>,
@@ -131,10 +166,11 @@ impl JoinHandle {
     pub fn subscribe_grants(&self) -> broadcast::Receiver<GrantEvent> {
         self.grants.resubscribe()
     }
-    /// Deregisters and keeps processing handover until all grants are released or expire.
+    /// Deregisters and processes handover until grants finish or the drain timeout expires.
     ///
+    /// While disconnected, revokes grants locally and stops reconnecting.
     /// Direct consumer users must finish their handlers with `Ownership::release`.
-    /// Use a timeout to bound this operation. Cancelling it aborts the driver.
+    /// Cancelling this future aborts the driver. Returns `DrainTimeout` if forced to stop.
     pub async fn shutdown(mut self) -> Result<()> {
         self.shutdown.close();
         let result = match self.task.as_mut() {
@@ -186,9 +222,12 @@ impl ConsumerClient {
         }
     }
 
-    /// Starts a session for `consumer` and `service` with `opts`.
-    /// Returns connection errors, `JoinTimeout`, or invalid timeout settings before
-    /// spawning the driver. The initial session handshake has a separate deadline.
+    /// Starts a consumer for `consumer` and `service` with `opts`.
+    ///
+    /// With recovery enabled, returns a handle before connecting. The driver retries
+    /// until shutdown or the optional disconnect timeout; this is not a readiness signal.
+    /// Without recovery, waits for the initial Join RPC and returns its errors directly.
+    /// Invalid timeout settings are rejected before starting the driver.
     pub async fn join(
         &self,
         consumer: Instance,
@@ -211,29 +250,32 @@ impl ConsumerClient {
 }
 
 async fn start_join(connector: Connector, opts: ConsumerOptions) -> Result<JoinHandle> {
-    if opts
-        .reconnect
-        .as_ref()
-        .is_some_and(|r| r.timeout.is_zero() || r.backoff.is_zero())
+    let valid_duration = |duration: Duration| {
+        !duration.is_zero() && tokio::time::Instant::now().checked_add(duration).is_some()
+    };
+    if !valid_duration(opts.join_timeout)
+        || !valid_duration(opts.drain_timeout)
+        || opts.reconnect.as_ref().is_some_and(|r| {
+            !valid_duration(r.backoff) || r.timeout.is_some_and(|timeout| !valid_duration(timeout))
+        })
     {
         return Err(ClientError::InvalidMessage(
-            "reconnect durations must be nonzero".into(),
+            "consumer durations must be nonzero and representable".into(),
         ));
     }
-    if opts.join_timeout.is_zero() {
-        return Err(ClientError::InvalidMessage(
-            "Join timeout must be nonzero".into(),
-        ));
-    }
-    let deadline = tokio::time::Instant::now()
-        .checked_add(opts.join_timeout)
-        .ok_or_else(|| ClientError::InvalidMessage("Join timeout is too large".into()))?;
-    let transport = tokio::select! {
-        biased;
-        () = tokio::time::sleep_until(deadline) => return Err(ClientError::JoinTimeout),
-        result = async { connector(Vec::new()).await } => result?,
+    let transport = if opts.reconnect.is_none() {
+        let deadline = tokio::time::Instant::now() + opts.join_timeout;
+        Some(tokio::select! {
+            biased;
+            () = tokio::time::sleep_until(deadline) => return Err(ClientError::JoinTimeout),
+            result = async { connector(Vec::new()).await } => result?,
+        })
+    } else {
+        None
     };
     let (mut driver, mut handle) = Driver::new(transport);
+    driver.join_timeout = opts.join_timeout;
+    driver.drain_timeout = opts.drain_timeout;
     driver.reconnect = opts.reconnect.map(|options| (options, connector));
     handle.task = Some(tokio::spawn(driver.run()));
     Ok(handle)
@@ -296,7 +338,7 @@ struct GrantAction {
 }
 
 struct Driver {
-    transport: Transport,
+    transport: Option<Transport>,
     cluster: watch::Sender<Arc<ClusterMap>>,
     cluster_needs_snapshot: bool,
     grants_tx: broadcast::Sender<GrantEvent>,
@@ -308,6 +350,11 @@ struct Driver {
     actions_tx: mpsc::UnboundedSender<GrantAction>,
     actions: mpsc::UnboundedReceiver<GrantAction>,
     reconnect: Option<(ReconnectOptions, Connector)>,
+    join_timeout: Duration,
+    drain_timeout: Duration,
+    disconnect_deadline: Option<tokio::time::Instant>,
+    drain_deadline: Option<tokio::time::Instant>,
+    deregistered: bool,
 }
 
 impl Drop for Driver {
@@ -320,7 +367,7 @@ impl Drop for Driver {
 }
 
 impl Driver {
-    fn new(transport: Transport) -> (Self, JoinHandle) {
+    fn new(transport: Option<Transport>) -> (Self, JoinHandle) {
         let (cluster, cluster_rx) = watch::channel(Arc::new(ClusterMap::empty()));
         let (grants_tx, grants) = broadcast::channel(256);
         let (assignments, assignments_rx) = watch::channel(Arc::new(HashMap::new()));
@@ -349,32 +396,69 @@ impl Driver {
                 actions_tx,
                 actions,
                 reconnect: None,
+                join_timeout: Duration::from_secs(30),
+                drain_timeout: Duration::from_secs(30),
+                disconnect_deadline: None,
+                drain_deadline: None,
+                deregistered: false,
             },
             handle,
         )
     }
 
     async fn send(&mut self, message: JoinMessage) -> Result<()> {
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            self.transport.outbound.send(message),
-        )
-        .await
-        .map_err(|_| ClientError::SessionClosed("outbound stalled".into()))?
-        .map_err(|_| ClientError::SessionClosed("outbound dropped".into()))
+        let Some(transport) = &self.transport else {
+            // Local completion still advances state while there is no coordinator.
+            return Ok(());
+        };
+        tokio::time::timeout(Duration::from_secs(5), transport.outbound.send(message))
+            .await
+            .map_err(|_| ClientError::SessionClosed("outbound stalled".into()))?
+            .map_err(|_| ClientError::SessionClosed("outbound dropped".into()))
     }
 
     async fn run(mut self) -> Result<()> {
-        let mut heartbeat = heartbeat_timer(None);
-        let mut deadline = tokio::time::Instant::now() + SESSION_ESTABLISH_TIMEOUT;
+        match self.run_sessions().await {
+            Err(ClientError::Cancelled) if self.shutdown.is_closed() => {
+                self.drain_disconnected(None).await
+            }
+            Err(ClientError::DisconnectTimeout) => {
+                self.drain_disconnected(Some(ClientError::DisconnectTimeout))
+                    .await
+            }
+            result => result,
+        }
+    }
+
+    async fn run_sessions(&mut self) -> Result<()> {
+        let ttl = if self.transport.is_none() {
+            Some(self.reconnect().await?)
+        } else {
+            None
+        };
+        let mut heartbeat = heartbeat_timer(ttl);
+        let mut deadline = tokio::time::Instant::now()
+            + ttl.map_or(SESSION_ESTABLISH_TIMEOUT, |ttl| {
+                ttl.duration_since(SystemTime::now()).unwrap_or_default()
+            });
         let mut draining = false;
         loop {
-            // Include message handling and its outbound sends in the deadline.
-            // Checking only inbound.next() would let a blocked send mask expiry.
+            let shutdown = self.shutdown.clone();
+            // Deadlines include message handling and outbound sends. Failed sends
+            // and expired sessions return to the same reconnection loop.
             let progress = tokio::select! {
                 biased;
+                () = wait_until(self.drain_deadline) => return Err(ClientError::DrainTimeout),
+                () = shutdown.closed(), if !draining => {
+                    self.begin_drain();
+                    draining = true;
+                    continue;
+                }
+                () = wait_until(self.disconnect_deadline), if !draining => {
+                    return Err(ClientError::DisconnectTimeout);
+                }
                 () = tokio::time::sleep_until(deadline) => Ok(SessionProgress::DeadlineElapsed),
-                result = self.step(&mut heartbeat, &mut draining) => result,
+                result = self.step(&mut heartbeat, draining) => result,
             };
             let ttl = match progress {
                 Ok(SessionProgress::Continue) => continue,
@@ -391,17 +475,8 @@ impl Driver {
                     )
                     .await?
                 }
-                Err(ClientError::Transport(status)) if transient(&status) => {
-                    self.recover(draining, ClientError::Transport(status))
-                        .await?
-                }
-                Err(error @ ClientError::InvalidCluster(_)) => {
-                    self.recover_cluster(draining, error).await?
-                }
-                Err(error) => return Err(error),
+                Err(error) => self.recover(draining, error).await?,
             };
-            // Convert the absolute server TTL once. A monotonic deadline also
-            // prevents a later wall-clock rollback from extending this session.
             deadline = tokio::time::Instant::now()
                 + ttl.duration_since(SystemTime::now()).unwrap_or_default();
             heartbeat = heartbeat_timer(Some(ttl));
@@ -411,20 +486,23 @@ impl Driver {
     async fn step(
         &mut self,
         heartbeat: &mut tokio::time::Interval,
-        draining: &mut bool,
+        draining: bool,
     ) -> Result<SessionProgress> {
-        if *draining && self.grants.is_empty() {
+        if draining && !self.deregistered {
+            self.deregistered = true;
+            self.send(wrap_client(client_message::Msg::Deregister(
+                client_message::Deregister {},
+            )))
+            .await?;
+        }
+        if draining && self.grants.is_empty() {
             self.send(session::closed_frame("client shutdown")).await?;
             return Ok(SessionProgress::Closed);
         }
         tokio::select! {
             biased;
-            () = self.shutdown.closed(), if !*draining => {
-                *draining = true;
-                self.send(wrap_client(client_message::Msg::Deregister(client_message::Deregister {}))).await?;
-            }
             Some(action) = self.actions.recv() => self.on_action(action).await?,
-            msg = self.transport.inbound.next() => {
+            msg = self.transport.as_mut().expect("connected session").inbound.next() => {
                 match msg {
                     Some(Ok(join)) => {
                         if let Some(ttl) = self.handle_inbound(join).await? {
@@ -441,129 +519,137 @@ impl Driver {
     }
 
     async fn recover(&mut self, draining: bool, error: ClientError) -> Result<SystemTime> {
-        if draining || self.shutdown.is_closed() || self.reconnect.is_none() {
+        if draining || self.shutdown.is_closed() {
+            return Err(ClientError::Cancelled);
+        }
+        if self.reconnect.is_none() {
             return Err(error);
         }
         warn!(%error, "recovering consumer session");
         self.reconnect().await
     }
 
-    async fn recover_cluster(&mut self, draining: bool, error: ClientError) -> Result<SystemTime> {
-        let Some((options, _)) = &self.reconnect else {
-            return Err(error);
-        };
-        let budget = options.timeout;
-        let shutdown = self.shutdown.clone();
-        let recovery = async {
-            let mut ttl = self.recover(draining, error).await?;
-            let mut heartbeat = heartbeat_timer(Some(ttl));
-            let mut deadline = tokio::time::Instant::now()
-                + ttl.duration_since(SystemTime::now()).unwrap_or_default();
-            let mut draining = false;
-            while self.cluster_needs_snapshot {
-                let progress =
-                    tokio::time::timeout_at(deadline, self.step(&mut heartbeat, &mut draining))
-                        .await
-                        .map_err(|_| {
-                            ClientError::SessionClosed(
-                                "session expired while awaiting cluster snapshot".into(),
-                            )
-                        })??;
-                match progress {
-                    SessionProgress::Renew(next) => {
-                        ttl = next;
-                        deadline = tokio::time::Instant::now()
-                            + ttl.duration_since(SystemTime::now()).unwrap_or_default();
-                        heartbeat = heartbeat_timer(Some(ttl));
-                    }
-                    SessionProgress::Continue => {}
-                    _ => {
-                        return Err(ClientError::SessionClosed(
-                            "session ended before cluster snapshot".into(),
-                        ));
-                    }
-                }
-            }
-            Ok(ttl)
-        };
-        tokio::select! {
-            biased;
-            () = shutdown.closed() => Err(ClientError::Cancelled),
-            result = tokio::time::timeout(budget, recovery) => result
-                .map_err(|_| ClientError::SessionClosed("cluster recovery timeout".into()))?,
-        }
-    }
-
-    async fn reconnect(&mut self) -> Result<SystemTime> {
-        let (options, connect) = self.reconnect.clone().expect("reconnect configured");
+    fn disconnect(&mut self) {
+        self.transport = None;
         self.lease = None;
         for grant in self.grants.values_mut() {
             grant.confirmed = false;
         }
         self.cluster_needs_snapshot = true;
-        // Keep peer routes so partial restart snapshots can reconcile existing grants.
-        let attempt = async {
-            loop {
-                tokio::time::sleep(options.backoff).await;
-                let active = self
-                    .grants
-                    .values()
-                    .filter(|g| {
-                        !g.revoked
-                            && !g.ownership.expired.is_closed()
-                            && SystemTime::now() < g.ownership.expiration()
-                    })
-                    .map(|g| g.pb_grant.clone())
-                    .collect();
-                match connect(active).await {
-                    Ok(mut transport) => {
-                        // An RPC response alone is not recovery. Keep silent or
-                        // repeatedly broken establishment inside this deadline.
-                        match transport.inbound.next().await {
-                            Some(Ok(JoinMessage {
-                                msg: Some(join_message::Msg::Session(message)),
-                            })) => match session::classify(&message) {
-                                Some(session::SessionEvent::Established { ttl })
-                                    if ttl > SystemTime::now() =>
-                                {
-                                    return Ok((transport, ttl));
-                                }
-                                // A stale handshake is not recovery. Keep retrying
-                                // within the same disconnect episode's timeout.
-                                Some(session::SessionEvent::Established { .. }) => {}
-                                Some(session::SessionEvent::Closed { error }) => {
-                                    return Err(ClientError::SessionClosed(error));
-                                }
-                                _ => {
-                                    return Err(ClientError::InvalidMessage(
-                                        "expected session Established during reconnect".into(),
-                                    ));
-                                }
-                            },
-                            Some(Err(status)) if transient(&status) => {}
-                            Some(Err(status)) => return Err(ClientError::Transport(status)),
-                            None => {}
-                            _ => {
-                                return Err(ClientError::InvalidMessage(
-                                    "expected session Established during reconnect".into(),
-                                ));
-                            }
+        if self.disconnect_deadline.is_none() {
+            self.disconnect_deadline = self
+                .reconnect
+                .as_ref()
+                .and_then(|(options, _)| options.timeout)
+                .map(|timeout| tokio::time::Instant::now() + timeout);
+        }
+    }
+
+    async fn reconnect(&mut self) -> Result<SystemTime> {
+        let (options, connect) = self.reconnect.clone().expect("reconnect configured");
+        let mut delay = self.transport.is_some();
+        self.disconnect();
+        loop {
+            if delay {
+                self.while_disconnected(tokio::time::sleep(options.backoff))
+                    .await?;
+            }
+            delay = true;
+            let active = self
+                .grants
+                .values()
+                .filter(|g| {
+                    !g.revoked
+                        && !g.ownership.expired.is_closed()
+                        && SystemTime::now() < g.ownership.expiration()
+                })
+                .map(|g| g.pb_grant.clone())
+                .collect();
+            let attempt = async {
+                let mut transport = connect(active).await?;
+                match transport.inbound.next().await {
+                    Some(Ok(JoinMessage {
+                        msg: Some(join_message::Msg::Session(message)),
+                    })) => match session::classify(&message) {
+                        Some(session::SessionEvent::Established { ttl })
+                            if ttl > SystemTime::now() =>
+                        {
+                            Ok((transport, ttl))
                         }
-                    }
-                    Err(ClientError::Transport(status)) if transient(&status) => {}
-                    Err(error) => return Err(error),
+                        Some(session::SessionEvent::Closed { error }) => {
+                            Err(ClientError::SessionClosed(error))
+                        }
+                        _ => Err(ClientError::InvalidMessage(
+                            "expected unexpired session Established".into(),
+                        )),
+                    },
+                    Some(Err(status)) => Err(ClientError::Transport(status)),
+                    None => Err(ClientError::SessionClosed(
+                        "stream ended during establishment".into(),
+                    )),
+                    _ => Err(ClientError::InvalidMessage(
+                        "expected session Established during reconnect".into(),
+                    )),
                 }
+            };
+            let attempt_deadline = tokio::time::Instant::now() + self.join_timeout;
+            let result = self
+                .while_disconnected(async {
+                    tokio::select! {
+                        biased;
+                        () = tokio::time::sleep_until(attempt_deadline) => Err(ClientError::JoinTimeout),
+                        result = attempt => result,
+                    }
+                })
+                .await?;
+            match result {
+                Ok((transport, ttl)) => {
+                    self.transport = Some(transport);
+                    return Ok(ttl);
+                }
+                Err(error) => warn!(%error, "consumer connection attempt failed; retrying"),
             }
-        };
-        let (transport, ttl) = tokio::select! {
-            biased;
-            () = self.shutdown.closed() => return Err(ClientError::SessionClosed("shutdown while disconnected".into())),
-            result = tokio::time::timeout(options.timeout, attempt) => {
-                result.map_err(|_| ClientError::SessionClosed("reconnect timed out".into()))??
+        }
+    }
+
+    async fn while_disconnected<T>(&mut self, future: impl Future<Output = T>) -> Result<T> {
+        tokio::pin!(future);
+        loop {
+            tokio::select! {
+                biased;
+                () = self.shutdown.closed() => return Err(ClientError::Cancelled),
+                () = wait_until(self.disconnect_deadline) => return Err(ClientError::DisconnectTimeout),
+                Some(action) = self.actions.recv() => self.on_action(action).await?,
+                result = &mut future => return Ok(result),
             }
-        };
-        self.transport = transport;
-        Ok(ttl)
+        }
+    }
+
+    fn begin_drain(&mut self) {
+        self.shutdown.close();
+        self.drain_deadline
+            .get_or_insert_with(|| tokio::time::Instant::now() + self.drain_timeout);
+    }
+
+    async fn drain_disconnected(&mut self, reason: Option<ClientError>) -> Result<()> {
+        self.disconnect();
+        self.begin_drain();
+        self.cluster.send_replace(Arc::new(ClusterMap::empty()));
+        for grant in self.grants.values_mut() {
+            if !grant.revoked {
+                grant.revoked = true;
+                grant.pb_grant.state = pb::GrantState::Revoked as i32;
+                grant.ownership.revoke();
+            }
+        }
+        while !self.grants.is_empty() {
+            tokio::select! {
+                biased;
+                () = wait_until(self.drain_deadline) => return Err(reason.unwrap_or(ClientError::DrainTimeout)),
+                Some(action) = self.actions.recv() => self.on_action(action).await?,
+            }
+        }
+        reason.map_or(Ok(()), Err)
     }
 
     async fn handle_inbound(&mut self, join: JoinMessage) -> Result<Option<SystemTime>> {
@@ -597,6 +683,7 @@ impl Driver {
                     match current.apply(cm) {
                         Ok(next) => {
                             self.cluster_needs_snapshot = false;
+                            self.disconnect_deadline = None;
                             self.cluster.send_replace(Arc::new(next));
                         }
                         Err(error) => {
@@ -942,11 +1029,11 @@ fn heartbeat_timer(ttl: Option<SystemTime>) -> tokio::time::Interval {
     timer
 }
 
-fn transient(status: &tonic::Status) -> bool {
-    matches!(
-        status.code(),
-        tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Cancelled
-    )
+async fn wait_until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
 }
 
 fn spawn_grant_watcher(

@@ -34,7 +34,7 @@ fn driver() -> (Driver, JoinHandle, mpsc::Receiver<JoinMessage>) {
         outbound,
         inbound: Box::pin(futures::stream::pending()),
     };
-    let (driver, handle) = Driver::new(transport);
+    let (driver, handle) = Driver::new(Some(transport));
     (driver, handle, outgoing)
 }
 

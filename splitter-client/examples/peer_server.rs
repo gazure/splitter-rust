@@ -79,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(endpoint = %peer.endpoint, local = %peer.local_addr, "peer server up");
 
     // --- 2. Connect to the coordinator and build the Dispatcher ---
-    let channel = Channel::from_shared(endpoint.clone())?.connect().await?;
+    let channel = Channel::from_shared(endpoint.clone())?.connect_lazy();
     let instance = Instance {
         id: InstanceId::new(),
         location: Location::new(region, node),

@@ -31,7 +31,9 @@ async fn initial_join_timeout_drops_pending_rpc_before_spawning_driver() {
         Duration::from_secs(10),
         start_join(
             pending_connector(dropped.clone()),
-            ConsumerOptions::default().with_join_timeout(Duration::from_secs(2)),
+            ConsumerOptions::default()
+                .without_reconnect()
+                .with_join_timeout(Duration::from_secs(2)),
         ),
     )
     .await
@@ -42,12 +44,9 @@ async fn initial_join_timeout_drops_pending_rpc_before_spawning_driver() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn default_initial_join_budget_is_thirty_seconds_even_with_reconnect() {
+async fn fail_fast_initial_join_budget_is_thirty_seconds() {
     let start = tokio::time::Instant::now();
-    let options = ConsumerOptions::default().with_reconnect(ReconnectOptions {
-        timeout: Duration::from_secs(60),
-        backoff: Duration::from_secs(1),
-    });
+    let options = ConsumerOptions::default().without_reconnect();
     let result = timeout(
         Duration::from_secs(40),
         start_join(pending_connector(Arc::new(AtomicBool::new(false))), options),
@@ -65,7 +64,9 @@ async fn invalid_timeout_is_rejected_before_connector_invocation() {
         assert!(matches!(
             start_join(
                 connector,
-                ConsumerOptions::default().with_join_timeout(duration)
+                ConsumerOptions::default()
+                    .without_reconnect()
+                    .with_join_timeout(duration)
             )
             .await,
             Err(ClientError::InvalidMessage(_))
@@ -80,7 +81,7 @@ async fn caller_cancellation_drops_pending_initial_rpc() {
         Duration::from_secs(1),
         start_join(
             pending_connector(dropped.clone()),
-            ConsumerOptions::default(),
+            ConsumerOptions::default().without_reconnect(),
         ),
     )
     .await;
@@ -98,7 +99,7 @@ async fn initial_transport_error_is_preserved_without_retry() {
         })
     });
     assert!(
-        matches!(start_join(connector, ConsumerOptions::default()).await, Err(ClientError::Transport(status)) if status.code() == tonic::Code::PermissionDenied)
+        matches!(start_join(connector, ConsumerOptions::default().without_reconnect()).await, Err(ClientError::Transport(status)) if status.code() == tonic::Code::PermissionDenied)
     );
 }
 
@@ -117,7 +118,9 @@ async fn successful_rpc_returns_handle_and_session_can_outlive_join_timeout() {
     });
     let handle = start_join(
         connector,
-        ConsumerOptions::default().with_join_timeout(Duration::from_secs(1)),
+        ConsumerOptions::default()
+            .without_reconnect()
+            .with_join_timeout(Duration::from_secs(1)),
     )
     .await
     .unwrap();
@@ -140,7 +143,9 @@ async fn deadline_wins_if_rpc_response_becomes_ready_at_the_same_instant() {
     });
     let result = start_join(
         connector,
-        ConsumerOptions::default().with_join_timeout(Duration::from_secs(1)),
+        ConsumerOptions::default()
+            .without_reconnect()
+            .with_join_timeout(Duration::from_secs(1)),
     )
     .await;
     assert!(matches!(result, Err(ClientError::JoinTimeout)));

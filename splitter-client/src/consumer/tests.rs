@@ -11,6 +11,7 @@ mod expired_assignments;
 mod initial_join;
 mod live_promotions;
 mod promotion;
+mod reconnection;
 
 struct Harness {
     driver: Driver,
@@ -23,10 +24,10 @@ impl Harness {
     fn new() -> Self {
         let (inbound, receiver) = mpsc::channel(1024);
         let (outbound, outgoing) = mpsc::channel(1024);
-        let (driver, handle) = Driver::new(Transport {
+        let (driver, handle) = Driver::new(Some(Transport {
             outbound,
             inbound: Box::pin(ReceiverStream::new(receiver)),
-        });
+        }));
         Self {
             driver,
             handle,
@@ -357,7 +358,7 @@ async fn reconnect_replays_unexpired_grants_and_preserves_identity() {
     let captured = replay.clone();
     h.driver.reconnect = Some((
         ReconnectOptions {
-            timeout: Duration::from_secs(1),
+            timeout: Some(Duration::from_secs(1)),
             backoff: Duration::from_millis(1),
         },
         Arc::new(move |active| {
@@ -381,19 +382,19 @@ async fn reconnect_is_bounded_and_shutdown_interrupts_it() {
     let mut h = Harness::new();
     h.driver.reconnect = Some((
         ReconnectOptions {
-            timeout: Duration::from_millis(10),
+            timeout: Some(Duration::from_millis(10)),
             backoff: Duration::from_millis(1),
         },
         Arc::new(|_| Box::pin(std::future::pending())),
     ));
     assert!(matches!(
         h.driver.reconnect().await,
-        Err(ClientError::SessionClosed(_))
+        Err(ClientError::DisconnectTimeout)
     ));
     h.handle.shutdown.close();
     assert!(matches!(
         h.driver.reconnect().await,
-        Err(ClientError::SessionClosed(_))
+        Err(ClientError::Cancelled)
     ));
 }
 
@@ -418,7 +419,7 @@ async fn silent_reconnected_stream_does_not_reset_recovery_deadline() {
     let mut h = Harness::new();
     h.driver.reconnect = Some((
         ReconnectOptions {
-            timeout: Duration::from_millis(10),
+            timeout: Some(Duration::from_millis(10)),
             backoff: Duration::from_millis(1),
         },
         Arc::new(|_| {
@@ -433,7 +434,7 @@ async fn silent_reconnected_stream_does_not_reset_recovery_deadline() {
     ));
     assert!(matches!(
         h.driver.reconnect().await,
-        Err(ClientError::SessionClosed(_))
+        Err(ClientError::DisconnectTimeout)
     ));
 }
 

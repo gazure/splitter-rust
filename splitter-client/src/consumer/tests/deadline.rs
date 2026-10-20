@@ -1,7 +1,7 @@
 use super::*;
 use splitter_proto::session_pb::{self, message::Request};
 
-fn session_frame(ttl: SystemTime, ack: bool) -> JoinMessage {
+pub(super) fn session_frame(ttl: SystemTime, ack: bool) -> JoinMessage {
     let ttl = Some(system_time_to_timestamp(ttl));
     let request = if ack {
         Request::Ack(session_pb::message::HeartbeatAck { ttl })
@@ -90,6 +90,8 @@ async fn blocked_heartbeat_send_cannot_delay_session_expiration() {
     while h
         .driver
         .transport
+        .as_ref()
+        .unwrap()
         .outbound
         .try_send(JoinMessage::default())
         .is_ok()
@@ -171,7 +173,7 @@ async fn initial_stream_without_established_has_a_deadline() {
 fn pending_reconnect() -> (ReconnectOptions, Connector) {
     (
         ReconnectOptions {
-            timeout: Duration::from_secs(2),
+            timeout: Some(Duration::from_secs(2)),
             backoff: Duration::from_millis(100),
         },
         Arc::new(|_| Box::pin(std::future::pending())),
@@ -190,6 +192,10 @@ async fn session_expiration_reconnects_and_preserves_valid_ownership() {
             SystemTime::now() + Duration::from_secs(10),
             false,
         )))
+        .await
+        .unwrap();
+    incoming
+        .send(Ok(reconnection::empty_snapshot()))
         .await
         .unwrap();
     incoming
@@ -249,8 +255,10 @@ async fn failed_recovery_after_session_expiration_is_bounded() {
     );
     advance(Duration::from_secs(3)).await;
     assert!(h.handle.closed().is_closed());
-    assert!(matches!(h.handle.shutdown().await,
-        Err(ClientError::SessionClosed(message)) if message == "reconnect timed out"));
+    assert!(matches!(
+        h.handle.shutdown().await,
+        Err(ClientError::DisconnectTimeout)
+    ));
 }
 
 #[tokio::test(start_paused = true)]
@@ -259,8 +267,7 @@ async fn shutdown_interrupts_recovery_triggered_by_session_expiration() {
     h.driver.reconnect = Some(pending_reconnect());
     start(&mut h, Duration::from_secs(1)).await;
     advance(Duration::from_secs(1)).await;
-    assert!(matches!(h.handle.shutdown().await,
-        Err(ClientError::SessionClosed(message)) if message == "shutdown while disconnected"));
+    h.handle.shutdown().await.unwrap();
 }
 
 #[tokio::test(start_paused = true)]
@@ -280,11 +287,16 @@ async fn draining_session_expires_without_reconnecting() {
     h.handle.shutdown.close();
     tokio::task::yield_now().await;
     advance(Duration::from_secs(2)).await;
+    assert!(
+        !h.handle.closed().is_closed(),
+        "offline drain retains grants until completion or timeout"
+    );
+    advance(Duration::from_secs(30)).await;
     assert!(h.handle.closed().is_closed());
     assert!(h.handle.assignments.borrow().is_empty());
     assert!(matches!(
         h.handle.shutdown().await,
-        Err(ClientError::SessionClosed(_))
+        Err(ClientError::DrainTimeout)
     ));
 }
 
@@ -307,7 +319,9 @@ async fn expired_reconnect_handshakes_do_not_reset_the_recovery_budget() {
         }),
     ));
     let started = tokio::time::Instant::now();
-    assert!(matches!(h.driver.reconnect().await,
-        Err(ClientError::SessionClosed(message)) if message == "reconnect timed out"));
+    assert!(matches!(
+        h.driver.reconnect().await,
+        Err(ClientError::DisconnectTimeout)
+    ));
     assert!(started.elapsed() < Duration::from_secs(3));
 }

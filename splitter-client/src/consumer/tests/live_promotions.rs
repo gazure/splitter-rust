@@ -85,10 +85,10 @@ async fn live_delayed_promotion_releases_expired_grant() {
             Some((message, (inbound, gate)))
         },
     );
-    let (driver, mut second) = Driver::new(Transport {
+    let (driver, mut second) = Driver::new(Some(Transport {
         outbound: transport.outbound,
         inbound: Box::pin(inbound),
-    });
+    }));
     second.task = Some(tokio::spawn(driver.run()));
 
     first.shutdown.close();

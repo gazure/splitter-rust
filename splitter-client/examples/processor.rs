@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(%endpoint, %service, %region, %node, "connecting");
 
-    let channel = Channel::from_shared(endpoint)?.connect().await?;
+    let channel = Channel::from_shared(endpoint)?.connect_lazy();
     let instance = Instance {
         id: InstanceId::new(),
         location: Location::new(region, node),

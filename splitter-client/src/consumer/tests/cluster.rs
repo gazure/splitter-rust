@@ -80,7 +80,7 @@ async fn reconnect_preserves_routes_until_partial_snapshot_and_clears_on_close()
     })));
     h.driver.reconnect = Some((
         ReconnectOptions {
-            timeout: Duration::from_secs(10),
+            timeout: Some(Duration::from_secs(10)),
             backoff: Duration::from_secs(1),
         },
         Arc::new(move |_| {
@@ -112,7 +112,7 @@ async fn failed_recovery_clears_retained_routes() {
     let cluster = h.handle.cluster.clone();
     h.driver.reconnect = Some((
         ReconnectOptions {
-            timeout: Duration::from_secs(2),
+            timeout: Some(Duration::from_secs(2)),
             backoff: Duration::from_secs(1),
         },
         Arc::new(move |_| {
@@ -126,7 +126,7 @@ async fn failed_recovery_clears_retained_routes() {
         .unwrap();
     assert!(matches!(
         h.driver.run().await,
-        Err(ClientError::SessionClosed(_))
+        Err(ClientError::DisconnectTimeout)
     ));
     assert!(h.handle.closed().is_closed());
     assert!(h.handle.cluster.borrow().grants().is_empty());
@@ -186,7 +186,7 @@ async fn invalid_cluster_update_reconnects_and_accepts_fresh_snapshot() {
     })));
     h.driver.reconnect = Some((
         ReconnectOptions {
-            timeout: Duration::from_secs(10),
+            timeout: Some(Duration::from_secs(10)),
             backoff: Duration::from_secs(1),
         },
         Arc::new(move |_| {
@@ -246,7 +246,7 @@ async fn cluster_recovery_requires_snapshot_within_total_recovery_budget() {
     })));
     h.driver.reconnect = Some((
         ReconnectOptions {
-            timeout: Duration::from_secs(3),
+            timeout: Some(Duration::from_secs(3)),
             backoff: Duration::from_secs(1),
         },
         Arc::new(move |_| {
@@ -260,7 +260,7 @@ async fn cluster_recovery_requires_snapshot_within_total_recovery_budget() {
         .unwrap();
     let start = tokio::time::Instant::now();
     let error = h.driver.run().await.unwrap_err();
-    assert!(matches!(error, ClientError::SessionClosed(ref s) if s == "cluster recovery timeout"));
+    assert!(matches!(error, ClientError::DisconnectTimeout));
     assert_eq!(start.elapsed(), Duration::from_secs(3));
     assert!(h.handle.cluster.borrow().grants().is_empty());
 }
