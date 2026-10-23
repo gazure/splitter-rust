@@ -153,14 +153,13 @@ impl ClusterMap {
             .timestamp
             .as_ref()
             .map_or(SystemTime::UNIX_EPOCH, timestamp_to_system_time);
-        let version = msg.version;
 
         match msg.msg {
             Some(cluster_message::Msg::Snapshot(snap)) => {
-                apply_snapshot(self, snap, version, timestamp)
+                apply_snapshot(self, snap, msg.version, timestamp)
             }
             Some(cluster_message::Msg::Change(change)) => {
-                self.apply_change(change, version, timestamp)
+                self.apply_change(change, msg.version, timestamp)
             }
             None => Err(ClientError::InvalidMessage(
                 "ClusterMessage without a variant".into(),
@@ -199,8 +198,7 @@ impl ClusterMap {
         }
         if let Some(update) = change.update {
             for g in update.grants {
-                let gid = GrantId(g.id.clone());
-                if let Some(old) = self.grants.get(&gid) {
+                if let Some(old) = self.grants.get(&GrantId(g.id.clone())) {
                     let mut grant = old.clone();
                     if let Some(shard) = g.shard {
                         grant.shard = Shard::try_from(shard)?;
@@ -261,16 +259,11 @@ impl ClusterMap {
             states
         };
 
-        for state in wanted {
-            if let Some(g) = self
-                .grants
+        wanted.iter().find_map(|state| {
+            self.grants
                 .values()
                 .find(|g| &g.state == state && shard_covers(&g.shard, key))
-            {
-                return Some(g);
-            }
-        }
-        None
+        })
     }
 
     pub fn shards_for_domain(&self, domain: &QualifiedDomainName) -> Vec<&Shard> {
@@ -309,10 +302,11 @@ fn apply_assignment(
     map: &mut ClusterMap,
     assign: cluster_message::Assignment,
 ) -> Result<(), ClientError> {
-    let consumer_pb = assign
-        .consumer
-        .ok_or_else(|| ClientError::InvalidMessage("Assignment without consumer".into()))?;
-    let consumer = Instance::try_from(consumer_pb)?;
+    let consumer = Instance::try_from(
+        assign
+            .consumer
+            .ok_or_else(|| ClientError::InvalidMessage("Assignment without consumer".into()))?,
+    )?;
     let cid = consumer.id;
 
     // Refresh endpoint metadata even when this consumer was retained from a snapshot.

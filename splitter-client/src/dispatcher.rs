@@ -84,8 +84,7 @@ impl DispatcherBuilder {
     }
 
     pub async fn build(self, channel: Channel) -> Result<Dispatcher> {
-        let client = ConsumerClient::new(channel);
-        let join = client
+        let join = ConsumerClient::new(channel)
             .join(self.instance.clone(), self.service.clone(), self.options)
             .await?;
 

@@ -121,8 +121,8 @@ impl<F: RangeFactory> DispatchFilter for Processor<F> {
         else {
             return false;
         };
-        let range = Arc::new(range);
-        self.run_grant(id, shard, ownership, range, loader).await;
+        self.run_grant(id, shard, ownership, Arc::new(range), loader)
+            .await;
         true
     }
 }
@@ -323,8 +323,7 @@ mod tests {
         let took = task.await.expect("task joined");
         assert!(took);
 
-        let events = log.lock().unwrap().clone();
-        let joined = events.join("|");
+        let joined = log.lock().unwrap().join("|");
         assert!(
             joined.contains("r initialized")
                 && joined.contains("r drain start")

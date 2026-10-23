@@ -222,49 +222,41 @@ impl Ownership {
     /// grant has been activated outright). Returns the loader on success, or
     /// an ownership error if the grant is revoked or expires first.
     pub async fn wait_for_unload(self: &Arc<Self>) -> Result<Arc<Loader>, ClientError> {
-        let active = self.active.reader();
-        let unloaded = self.loader.unloaded.reader();
-        let revoked = self.revoked.reader();
-
         tokio::select! {
             biased;
             () = self.wait_for_expiration() => Err(ClientError::Expired),
-            () = revoked.closed() => Err(ClientError::Revoked),
-            () = active.closed() => Ok(self.loader.clone()),
-            () = unloaded.closed() => Ok(self.loader.clone()),
+            () = self.revoked.closed() => Err(ClientError::Revoked),
+            () = self.active.closed() => Ok(self.loader.clone()),
+            () = self.loader.unloaded.closed() => Ok(self.loader.clone()),
         }
     }
 
     /// Block until the grant is activated. Errors on revoke or expiration.
     pub async fn wait_for_active(&self) -> Result<(), ClientError> {
-        let active = self.active.reader();
-        let revoked = self.revoked.reader();
         tokio::select! {
             biased;
             () = self.wait_for_expiration() => Err(ClientError::Expired),
-            () = revoked.closed() => Err(ClientError::Revoked),
-            () = active.closed() => Ok(()),
+            () = self.revoked.closed() => Err(ClientError::Revoked),
+            () = self.active.closed() => Ok(()),
         }
     }
 
     /// Block until the grant is revoked. Returns the unloader. Errors on
     /// expiration.
     pub async fn wait_for_revoke(self: &Arc<Self>) -> Result<Arc<Unloader>, ClientError> {
-        let revoked = self.revoked.reader();
         tokio::select! {
             biased;
             () = self.wait_for_expiration() => Err(ClientError::Expired),
-            () = revoked.closed() => Ok(self.unloader.clone()),
+            () = self.revoked.closed() => Ok(self.unloader.clone()),
         }
     }
 
     /// Block until the next counterpart has loaded. Errors on expiration.
     pub async fn wait_for_load(&self) -> Result<(), ClientError> {
-        let loaded = self.unloader.loaded.reader();
         tokio::select! {
             biased;
             () = self.wait_for_expiration() => Err(ClientError::Expired),
-            () = loaded.closed() => Ok(()),
+            () = self.unloader.loaded.closed() => Ok(()),
         }
     }
 

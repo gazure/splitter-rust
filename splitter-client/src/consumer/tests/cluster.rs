@@ -88,8 +88,7 @@ async fn reconnect_preserves_routes_until_partial_snapshot_and_clears_on_close()
             if captured_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
                 Box::pin(async { Err(ClientError::Transport(tonic::Status::unavailable("retry"))) })
             } else {
-                let transport = transport.lock().unwrap().take().unwrap();
-                Box::pin(async move { Ok(transport) })
+                ready(Ok(transport.lock().unwrap().take().unwrap())).boxed()
             }
         }),
     ));
@@ -190,12 +189,12 @@ async fn invalid_cluster_update_reconnects_and_accepts_fresh_snapshot() {
             backoff: Duration::from_secs(1),
         },
         Arc::new(move |_| {
-            let transport = transport
+            ready(Ok(transport
                 .lock()
                 .unwrap()
                 .take()
-                .expect("one recovery attempt");
-            Box::pin(async move { Ok(transport) })
+                .expect("one recovery attempt")))
+            .boxed()
         }),
     ));
     h.inbound
@@ -249,10 +248,7 @@ async fn cluster_recovery_requires_snapshot_within_total_recovery_budget() {
             timeout: Some(Duration::from_secs(3)),
             backoff: Duration::from_secs(1),
         },
-        Arc::new(move |_| {
-            let transport = transport.lock().unwrap().take().unwrap();
-            Box::pin(async move { Ok(transport) })
-        }),
+        Arc::new(move |_| ready(Ok(transport.lock().unwrap().take().unwrap())).boxed()),
     ));
     h.inbound
         .send(Ok(incremental(&previous, 99)))

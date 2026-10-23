@@ -3,6 +3,7 @@ use crate::{
     ids::{DomainType, QualifiedDomainName},
     wrap::system_time_to_timestamp,
 };
+use futures::{FutureExt, future::ready};
 use tokio::time::timeout;
 
 mod cluster;
@@ -363,8 +364,7 @@ async fn reconnect_replays_unexpired_grants_and_preserves_identity() {
         },
         Arc::new(move |active| {
             *captured.lock().unwrap() = active;
-            let transport = receiver.lock().unwrap().try_recv().unwrap();
-            Box::pin(async move { Ok(transport) })
+            ready(Ok(receiver.lock().unwrap().try_recv().unwrap())).boxed()
         }),
     ));
     h.driver.reconnect().await.unwrap();

@@ -260,12 +260,11 @@ mod tests {
     #[tokio::test]
     async fn apply_cluster_adds_known_peers() {
         let pool = ConnectionPool::new(ME);
-        let cluster = mk_cluster(vec![
+        pool.apply_cluster(&mk_cluster(vec![
             mk_instance(ME, "1.1.1.1:50052"),
             mk_instance(PEER_A, "2.2.2.2:50052"),
             mk_instance(PEER_B, "3.3.3.3:50052"),
-        ]);
-        pool.apply_cluster(&cluster);
+        ]));
         assert_eq!(pool.len(), 2);
         assert!(pool.resolve(&PEER_A).is_ok());
         assert!(pool.resolve(&PEER_B).is_ok());

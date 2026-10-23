@@ -69,12 +69,11 @@ impl PeerServerBuilder {
         let endpoint = self
             .advertised
             .unwrap_or_else(|| format!("http://{local_addr}"));
-        let incoming = TcpListenerStream::new(listener);
 
         let (tx, rx) = oneshot::channel::<()>();
         let task = tokio::spawn(async move {
             router
-                .serve_with_incoming_shutdown(incoming, async move {
+                .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async move {
                     let _ = rx.await;
                 })
                 .await
@@ -150,8 +149,10 @@ mod tests {
         // Empty router is legal — the server just refuses to route anything
         // but the port still opens.
         let router = Server::builder().add_routes(tonic::service::Routes::default());
-        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let peer = PeerServerBuilder::new(addr).serve(router).await.unwrap();
+        let peer = PeerServerBuilder::new("127.0.0.1:0".parse().unwrap())
+            .serve(router)
+            .await
+            .unwrap();
         assert!(peer.endpoint.starts_with("http://127.0.0.1:"));
         assert_eq!(peer.local_addr.ip().to_string(), "127.0.0.1");
         peer.shutdown().await.unwrap();
@@ -160,8 +161,7 @@ mod tests {
     #[tokio::test]
     async fn explicit_advertise_override() {
         let router = Server::builder().add_routes(tonic::service::Routes::default());
-        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let peer = PeerServerBuilder::new(addr)
+        let peer = PeerServerBuilder::new("127.0.0.1:0".parse().unwrap())
             .advertise("splitter-rs.internal:50052")
             .serve(router)
             .await
@@ -173,8 +173,10 @@ mod tests {
     #[tokio::test]
     async fn drop_before_shutdown_still_aborts() {
         let router = Server::builder().add_routes(tonic::service::Routes::default());
-        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let peer = PeerServerBuilder::new(addr).serve(router).await.unwrap();
+        let peer = PeerServerBuilder::new("127.0.0.1:0".parse().unwrap())
+            .serve(router)
+            .await
+            .unwrap();
         drop(peer);
         // Should not deadlock; give tokio a beat to run the abort.
         tokio::time::sleep(Duration::from_millis(10)).await;

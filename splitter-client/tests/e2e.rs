@@ -44,14 +44,14 @@ struct Env {
 }
 
 fn read_env() -> Env {
-    let endpoint =
-        std::env::var("SPLITTER_ENDPOINT").expect("set SPLITTER_ENDPOINT for live tests");
-    let service = QualifiedServiceName::parse(
-        &std::env::var("SPLITTER_SERVICE")
-            .expect("set SPLITTER_SERVICE to an isolated test service"),
-    )
-    .expect("SPLITTER_SERVICE must be tenant/service");
-    Env { endpoint, service }
+    Env {
+        endpoint: std::env::var("SPLITTER_ENDPOINT").expect("set SPLITTER_ENDPOINT for live tests"),
+        service: QualifiedServiceName::parse(
+            &std::env::var("SPLITTER_SERVICE")
+                .expect("set SPLITTER_SERVICE to an isolated test service"),
+        )
+        .expect("SPLITTER_SERVICE must be tenant/service"),
+    }
 }
 
 fn test_instance() -> Instance {
@@ -80,8 +80,7 @@ async fn connect(endpoint: &str) -> Channel {
 #[ignore = "requires an isolated live Splitter service; see module instructions"]
 async fn join_receives_initial_cluster_update() {
     let env = read_env();
-    let client = ConsumerClient::new(connect(&env.endpoint).await);
-    let handle = client
+    let handle = ConsumerClient::new(connect(&env.endpoint).await)
         .join(test_instance(), env.service, ConsumerOptions::default())
         .await
         .expect("join succeeds");
@@ -113,8 +112,7 @@ async fn join_receives_initial_cluster_update() {
 #[ignore = "requires an isolated live Splitter service; see module instructions"]
 async fn shutdown_closes_driver_cleanly() {
     let env = read_env();
-    let client = ConsumerClient::new(connect(&env.endpoint).await);
-    let handle = client
+    let handle = ConsumerClient::new(connect(&env.endpoint).await)
         .join(test_instance(), env.service, ConsumerOptions::default())
         .await
         .expect("join succeeds");

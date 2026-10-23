@@ -237,13 +237,13 @@ impl ConsumerClient {
         let inner = self.inner.clone();
         let options = opts.clone();
         let connector: Connector = Arc::new(move |active| {
-            let (inner, consumer, service, opts) = (
+            Box::pin(open_session(
                 inner.clone(),
                 consumer.clone(),
                 service.clone(),
                 options.clone(),
-            );
-            Box::pin(open_session(inner, consumer, service, opts, active))
+                active,
+            ))
         });
         start_join(connector, opts).await
     }
@@ -301,10 +301,14 @@ async fn open_session(
         .send(build_register(consumer, service, &opts, active))
         .await
         .map_err(|_| ClientError::Cancelled)?;
-    let response = client.join(ReceiverStream::new(receiver)).await?;
     Ok(Transport {
         outbound,
-        inbound: Box::pin(response.into_inner()),
+        inbound: Box::pin(
+            client
+                .join(ReceiverStream::new(receiver))
+                .await?
+                .into_inner(),
+        ),
     })
 }
 
@@ -859,7 +863,7 @@ impl Driver {
 
     async fn on_promote(&mut self, mut g: pb::Grant) -> Result<()> {
         let id = GrantId(g.id.clone());
-        let candidate = self.grants.get_mut(&id).filter(|entry| {
+        let Some(entry) = self.grants.get_mut(&id).filter(|entry| {
             entry.confirmed
                 && !entry.revoked
                 && !entry.ownership.expired.is_closed()
@@ -868,8 +872,7 @@ impl Driver {
                     grant_state_from_i32(entry.pb_grant.state),
                     GrantState::Allocated | GrantState::AllocatedLoaded
                 )
-        });
-        let Some(entry) = candidate else {
+        }) else {
             // Stop local ownership before acknowledging the rejected promotion.
             // Otherwise the coordinator can keep renewing a grant with no handler.
             self.remove_grant(&id);

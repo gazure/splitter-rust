@@ -63,10 +63,8 @@ where
         if now >= deadline {
             return Err(err);
         }
-        let remaining = deadline - now;
-        let sleep_for = delay.min(remaining);
         last_error = Some(err);
-        tokio::time::sleep(sleep_for).await;
+        tokio::time::sleep(delay.min(deadline - now)).await;
         delay = delay.saturating_mul(2).min(backoff.max);
     }
 }

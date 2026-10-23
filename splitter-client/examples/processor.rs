@@ -29,9 +29,8 @@ impl RangeFactory for LoggingFactory {
     type Range = RecordingRange;
 
     fn build(&self, id: GrantId, shard: Shard, _o: Arc<Ownership>) -> Option<RecordingRange> {
-        let label = format!("{shard}|{id}");
         Some(RecordingRange::new(
-            label,
+            format!("{shard}|{id}"),
             Duration::from_millis(100),
             Duration::from_millis(500),
             self.log.clone(),
@@ -70,26 +69,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let log = Arc::new(Mutex::new(Vec::new()));
-    let factory = Arc::new(LoggingFactory { log: log.clone() });
-    let processor = Processor::new(factory);
-
     let dispatcher = DispatcherBuilder::new(service, instance)
-        .filter(processor.clone())
+        .filter(Processor::new(Arc::new(LoggingFactory {
+            log: log.clone(),
+        })))
         .build(channel)
         .await?;
 
     tracing::info!(id = %dispatcher.id(), "dispatcher online");
 
     // Periodically flush the log so the user sees lifecycle transitions.
-    let log_printer = log.clone();
     let printer_task = tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            let mut buf = log_printer.lock().expect("log poisoned");
-            if !buf.is_empty() {
-                for line in buf.drain(..) {
-                    tracing::info!(target: "range", "{line}");
-                }
+            for line in log.lock().expect("log poisoned").drain(..) {
+                tracing::info!(target: "range", "{line}");
             }
         }
     });

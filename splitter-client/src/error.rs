@@ -125,15 +125,13 @@ mod tests {
 
     #[test]
     fn unavailable_is_ownership_but_preserves_status() {
-        let status = Status::unavailable("peer down");
-        let err = ClientError::from_grpc(status);
+        let err = ClientError::from_grpc(Status::unavailable("peer down"));
         assert!(err.is_ownership());
         assert!(matches!(err, ClientError::Transport(_)));
     }
 
     #[test]
     fn other_codes_are_not_ownership() {
-        let err = ClientError::from_grpc(Status::internal("boom"));
-        assert!(!err.is_ownership());
+        assert!(!ClientError::from_grpc(Status::internal("boom")).is_ownership());
     }
 }

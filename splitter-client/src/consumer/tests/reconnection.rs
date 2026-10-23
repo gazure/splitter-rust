@@ -65,8 +65,7 @@ async fn defaults_return_before_connecting_and_retry_initial_rpc_rejections() {
                 )))
             })
         } else {
-            let transport = transport.lock().unwrap().take().unwrap();
-            Box::pin(async move { Ok(transport) })
+            ready(Ok(transport.lock().unwrap().take().unwrap())).boxed()
         }
     });
     let mut handle = start_join(connector, ConsumerOptions::default())
@@ -142,8 +141,7 @@ async fn connection_and_handshake_attempts_are_individually_bounded() {
                     }
                 })
             } else {
-                let transport = transport.lock().unwrap().take().unwrap();
-                Box::pin(async move { Ok(transport) })
+                ready(Ok(transport.lock().unwrap().take().unwrap())).boxed()
             }
         });
         let start = tokio::time::Instant::now();
@@ -170,8 +168,7 @@ async fn server_closure_bad_handshakes_and_rpc_errors_all_retry() {
     let connector: Connector = Arc::new(move |_| {
         let attempt = attempts.fetch_add(1, Ordering::SeqCst);
         if attempt == 4 {
-            let transport = transport.lock().unwrap().take().unwrap();
-            return Box::pin(async move { Ok(transport) });
+            return ready(Ok(transport.lock().unwrap().take().unwrap())).boxed();
         }
         Box::pin(async move {
             let (outbound, _) = mpsc::channel(1);
@@ -220,12 +217,12 @@ async fn established_session_failures_all_reconnect() {
         h.driver.reconnect = Some((
             ReconnectOptions::default(),
             Arc::new(move |_| {
-                let transport = transport
+                ready(Ok(transport
                     .lock()
                     .unwrap()
                     .take()
-                    .expect("one successful reconnect");
-                Box::pin(async move { Ok(transport) })
+                    .expect("one successful reconnect")))
+                .boxed()
             }),
         ));
         match failure {

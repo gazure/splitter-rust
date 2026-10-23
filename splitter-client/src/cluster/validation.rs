@@ -12,10 +12,11 @@ fn invalid(message: impl Into<String>) -> ClientError {
 impl ClusterMap {
     pub(super) fn validate(&self, message: &ClusterMessage) -> Result<(), ClientError> {
         match message.msg.as_ref() {
-            Some(cluster_message::Msg::Snapshot(snapshot)) => {
-                let shards = unique_shards(&snapshot.shards)?;
-                validate_assignments(&shards, HashMap::new(), &snapshot.assignments)
-            }
+            Some(cluster_message::Msg::Snapshot(snapshot)) => validate_assignments(
+                &unique_shards(&snapshot.shards)?,
+                HashMap::new(),
+                &snapshot.assignments,
+            ),
             Some(cluster_message::Msg::Change(change)) => {
                 let origin = InstanceId::try_from(message.id.as_str())
                     .map_err(|_| invalid("invalid cluster origin"))?;
@@ -90,8 +91,7 @@ impl ClusterMap {
             change
                 .assign
                 .as_ref()
-                .map(|a| a.assignments.as_slice())
-                .unwrap_or_default(),
+                .map_or(&[], |a| a.assignments.as_slice()),
         )
     }
 }
@@ -128,10 +128,9 @@ fn validate_assignments(
 ) -> Result<(), ClientError> {
     let mut states: HashMap<Shard, Vec<GrantState>> = HashMap::new();
     for (shard, state) in grants.values() {
-        let current = states.entry(shard.clone()).or_default();
         // Explicit updates take precedence over unchanged grants during reconciliation.
         // A promotion can therefore conflict with an old grant that will be evicted.
-        current.push(*state);
+        states.entry(shard.clone()).or_default().push(*state);
     }
     let mut consumers = HashSet::new();
     for assignment in assignments {

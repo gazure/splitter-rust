@@ -112,10 +112,8 @@ async fn successful_rpc_returns_handle_and_session_can_outlive_join_timeout() {
         outbound,
         inbound: Box::pin(ReceiverStream::new(receiver)),
     })));
-    let connector: Connector = Arc::new(move |_| {
-        let transport = transport.lock().unwrap().take().unwrap();
-        Box::pin(async move { Ok(transport) })
-    });
+    let connector: Connector =
+        Arc::new(move |_| ready(Ok(transport.lock().unwrap().take().unwrap())).boxed());
     let handle = start_join(
         connector,
         ConsumerOptions::default()

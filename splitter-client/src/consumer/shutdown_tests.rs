@@ -30,11 +30,10 @@ fn grant(id: &str, state: pb::GrantState) -> pb::Grant {
 
 fn driver() -> (Driver, JoinHandle, mpsc::Receiver<JoinMessage>) {
     let (outbound, outgoing) = mpsc::channel(16);
-    let transport = Transport {
+    let (driver, handle) = Driver::new(Some(Transport {
         outbound,
         inbound: Box::pin(futures::stream::pending()),
-    };
-    let (driver, handle) = Driver::new(Some(transport));
+    }));
     (driver, handle, outgoing)
 }
 

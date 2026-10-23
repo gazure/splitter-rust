@@ -74,10 +74,7 @@ where
     match proxy.resolve(key) {
         Ok(client) => remote(client, req).await.map_err(ClientError::from_grpc),
         Err(ClientError::NoResolution) => {
-            if let Some(v) = proxy.lookup(key, &[]) {
-                return local(v, req).await;
-            }
-            Err(ClientError::NotOwned)
+            local(proxy.lookup(key, &[]).ok_or(ClientError::NotOwned)?, req).await
         }
         Err(e) => Err(e),
     }
@@ -107,10 +104,9 @@ where
     RFut: Future<Output = core::result::Result<Resp, tonic::Status>>,
     LFut: Future<Output = Result<Resp>>,
 {
-    let backoff = OwnershipBackoff::new(timeout);
     // &remote / &local each satisfy FnOnce via the blanket `&F: Fn` impl,
     // so one `handle` call per attempt consumes nothing of the outer closures.
-    retry_ownership(&backoff, || {
+    retry_ownership(&OwnershipBackoff::new(timeout), || {
         handle(proxy, key, req.clone(), &remote, &local)
     })
     .await

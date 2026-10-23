@@ -79,7 +79,8 @@ impl<C> DomainResolver<C> {
         }
         let cluster = self.cluster.borrow();
         let grant = cluster.lookup(key, &[]).ok_or(ClientError::NotOwned)?;
-        let channel = self.pool.resolve(&grant.consumer)?;
-        Ok((self.remote_fn)(channel))
+        self.pool
+            .resolve(&grant.consumer)
+            .map(|channel| (self.remote_fn)(channel))
     }
 }
