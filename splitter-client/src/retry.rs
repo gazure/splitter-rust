@@ -3,7 +3,7 @@
 //! Port of `pkg/model/proxy.go:51-68` (`RetryOwnership1`). Exponential
 //! backoff starting at 1s, capped at 5s, bounded by a total timeout. Only
 //! retries on errors classified as ownership failures (see
-//! [`ClientError::is_ownership`]); all others short-circuit.
+//! [`crate::ClientError::is_ownership`]); all others short-circuit.
 
 use std::future::Future;
 use std::time::Duration;
