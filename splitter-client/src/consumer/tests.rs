@@ -280,6 +280,42 @@ async fn duplicate_assignment_preserves_world_identity_and_stale_release_is_igno
 }
 
 #[tokio::test]
+async fn unconfirmed_and_revoked_grants_are_not_extended() {
+    let mut h = Harness::new();
+    h.driver
+        .on_assign(grant("stale", pb::GrantState::Active))
+        .await
+        .unwrap();
+    h.driver
+        .on_assign(grant("revoked", pb::GrantState::Revoked))
+        .await
+        .unwrap();
+    h.driver
+        .grants
+        .get_mut(&GrantId("stale".into()))
+        .unwrap()
+        .confirmed = false;
+    let before: Vec<_> = h
+        .driver
+        .grants
+        .values()
+        .map(|entry| entry.ownership.expiration())
+        .collect();
+    h.driver.on_extend(client_message::Extend {
+        lease: Some(system_time_to_timestamp(
+            SystemTime::now() + Duration::from_secs(600),
+        )),
+    });
+    let after: Vec<_> = h
+        .driver
+        .grants
+        .values()
+        .map(|entry| entry.ownership.expiration())
+        .collect();
+    assert_eq!(before, after);
+}
+
+#[tokio::test]
 async fn rejects_assignment_without_lease() {
     let mut h = Harness::new();
     let mut g = grant("missing", pb::GrantState::Active);
@@ -289,6 +325,109 @@ async fn rejects_assignment_without_lease() {
         Err(ClientError::InvalidMessage(_))
     ));
     assert!(h.driver.grants.is_empty());
+}
+
+#[tokio::test]
+async fn reconnect_replays_unexpired_grants_and_preserves_identity() {
+    let mut h = Harness::new();
+    let g = grant("g", pb::GrantState::Active);
+    h.driver.on_assign(g.clone()).await.unwrap();
+    let ownership = h.driver.grants[&GrantId("g".into())].ownership.clone();
+    let (transport_tx, transport_rx) = std::sync::mpsc::channel();
+    let (incoming, receiver) = mpsc::channel(8);
+    incoming.send(Ok(established())).await.unwrap();
+    let (outbound, _outgoing) = mpsc::channel(8);
+    assert!(
+        transport_tx
+            .send(Transport {
+                outbound,
+                inbound: Box::pin(ReceiverStream::new(receiver))
+            })
+            .is_ok()
+    );
+    let receiver = Arc::new(std::sync::Mutex::new(transport_rx));
+    let replay = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = replay.clone();
+    h.driver.reconnect = Some((
+        ReconnectOptions {
+            timeout: Duration::from_secs(1),
+            backoff: Duration::from_millis(1),
+        },
+        Arc::new(move |active| {
+            *captured.lock().unwrap() = active;
+            let transport = receiver.lock().unwrap().try_recv().unwrap();
+            Box::pin(async move { Ok(transport) })
+        }),
+    ));
+    h.driver.reconnect().await.unwrap();
+    assert_eq!(replay.lock().unwrap().len(), 1);
+    assert!(!h.driver.grants[&GrantId("g".into())].confirmed);
+    h.driver.on_assign(g).await.unwrap();
+    assert!(Arc::ptr_eq(
+        &ownership,
+        &h.driver.grants[&GrantId("g".into())].ownership
+    ));
+}
+
+#[tokio::test]
+async fn reconnect_is_bounded_and_shutdown_interrupts_it() {
+    let mut h = Harness::new();
+    h.driver.reconnect = Some((
+        ReconnectOptions {
+            timeout: Duration::from_millis(10),
+            backoff: Duration::from_millis(1),
+        },
+        Arc::new(|_| Box::pin(std::future::pending())),
+    ));
+    assert!(matches!(
+        h.driver.reconnect().await,
+        Err(ClientError::SessionClosed(_))
+    ));
+    h.handle.shutdown.close();
+    assert!(matches!(
+        h.driver.reconnect().await,
+        Err(ClientError::SessionClosed(_))
+    ));
+}
+
+fn established() -> JoinMessage {
+    use splitter_proto::session_pb;
+    JoinMessage {
+        msg: Some(join_message::Msg::Session(session_pb::Message {
+            request: Some(session_pb::message::Request::Established(
+                session_pb::message::Established {
+                    ttl: Some(system_time_to_timestamp(
+                        SystemTime::now() + Duration::from_secs(60),
+                    )),
+                    ..Default::default()
+                },
+            )),
+        })),
+    }
+}
+
+#[tokio::test]
+async fn silent_reconnected_stream_does_not_reset_recovery_deadline() {
+    let mut h = Harness::new();
+    h.driver.reconnect = Some((
+        ReconnectOptions {
+            timeout: Duration::from_millis(10),
+            backoff: Duration::from_millis(1),
+        },
+        Arc::new(|_| {
+            Box::pin(async {
+                let (outbound, _receiver) = mpsc::channel(1);
+                Ok(Transport {
+                    outbound,
+                    inbound: Box::pin(futures::stream::pending()),
+                })
+            })
+        }),
+    ));
+    assert!(matches!(
+        h.driver.reconnect().await,
+        Err(ClientError::SessionClosed(_))
+    ));
 }
 
 #[tokio::test]

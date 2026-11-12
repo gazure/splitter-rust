@@ -48,6 +48,7 @@ pub mod wrap;
 pub use cluster::{ClusterId, ClusterMap, ConsumerEntry, GrantEntry};
 pub use consumer::{
     AssignmentSnapshot, ConsumerClient, ConsumerOptions, GrantAssignment, GrantEvent, JoinHandle,
+    ReconnectOptions,
 };
 pub use dispatcher::{DispatchFilter, Dispatcher, DispatcherBuilder, FilterContext};
 pub use error::{ClientError, Result};
