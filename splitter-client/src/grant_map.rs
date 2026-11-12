@@ -8,8 +8,7 @@
 //! Phase 2 scope: per-id writes + lookups. The by-key (domain+shard range)
 //! lookup lives in Phase 4 when the Proxy lands and needs it.
 
-use std::collections::HashMap;
-use std::sync::RwLock;
+use std::{collections::HashMap, sync::RwLock};
 
 use crate::ids::{GrantId, GrantState, Shard};
 
@@ -39,7 +38,14 @@ impl<T: Clone> GrantMap<T> {
 
     pub fn write(&self, id: GrantId, shard: Shard, state: GrantState, value: T) {
         let mut m = self.inner.write().expect("grant map poisoned");
-        m.insert(id, Entry { shard, state, value });
+        m.insert(
+            id,
+            Entry {
+                shard,
+                state,
+                value,
+            },
+        );
     }
 
     pub fn allocated(&self, id: GrantId, shard: Shard, value: T) {
@@ -63,10 +69,29 @@ impl<T: Clone> GrantMap<T> {
         m.remove(id).map(|e| (e.shard, e.state, e.value))
     }
 
+    /// Removes a grant only if `matches` accepts its current value.
+    ///
+    /// The predicate runs under the write lock. It must not access this map.
+    /// Returns the removed entry, or `None` if the entry changed or is absent.
+    pub fn delete_if(
+        &self,
+        id: &GrantId,
+        matches: impl FnOnce(&T) -> bool,
+    ) -> Option<(Shard, GrantState, T)> {
+        let mut map = self.inner.write().expect("grant map poisoned");
+        if map.get(id).is_some_and(|entry| matches(&entry.value)) {
+            map.remove(id)
+                .map(|entry| (entry.shard, entry.state, entry.value))
+        } else {
+            None
+        }
+    }
+
     /// Fetch a value by grant id. Returns `(shard, state, value)`.
     pub fn get(&self, id: &GrantId) -> Option<(Shard, GrantState, T)> {
         let m = self.inner.read().expect("grant map poisoned");
-        m.get(id).map(|e| (e.shard.clone(), e.state, e.value.clone()))
+        m.get(id)
+            .map(|e| (e.shard.clone(), e.state, e.value.clone()))
     }
 
     pub fn len(&self) -> usize {
