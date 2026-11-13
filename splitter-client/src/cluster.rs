@@ -1,11 +1,14 @@
 //! Immutable cluster snapshot.
 //!
-//! Phase-1 port of `pkg/model/cluster.go`. We deliberately skip the server-side
-//! validation the Go code does on inbound snapshots/changes — the server is
-//! authoritative and the client only needs to mirror the resulting view for
-//! lookups and consumer enumeration.
+//! Reconciles partial snapshots and incremental changes using the grant retention
+//! rules in Go's `pkg/model/cluster.go`. Coordinator assignments take precedence
+//! over compatible grants retained from the previous view. Protocol validation
+//! of inbound snapshots and changes is not yet implemented.
 
-use std::{collections::HashMap, time::SystemTime};
+use std::{
+    collections::{HashMap, HashSet},
+    time::SystemTime,
+};
 
 use splitter_proto::pb::{ClusterMessage, cluster_message};
 
@@ -70,11 +73,10 @@ impl ClusterMap {
             .map(timestamp_to_system_time)
             .unwrap_or(SystemTime::UNIX_EPOCH);
         let version = msg.version;
-        let cluster_origin_id = msg.id.clone();
 
         match msg.msg {
             Some(cluster_message::Msg::Snapshot(snap)) => {
-                apply_snapshot(snap, version, timestamp, cluster_origin_id)
+                apply_snapshot(self, snap, version, timestamp)
             }
             Some(cluster_message::Msg::Change(change)) => {
                 self.apply_change(change, version, timestamp)
@@ -91,56 +93,68 @@ impl ClusterMap {
         version: i64,
         timestamp: SystemTime,
     ) -> Result<Self, ClientError> {
-        let mut next = self.clone();
-        next.id = ClusterId {
-            version,
-            origin: self.id.origin.clone(),
-            timestamp,
+        let shards = match change.shards {
+            Some(shards) => decode_shards(shards.shards)?,
+            None => self.shards.clone(),
+        };
+        let mut next = Self {
+            id: ClusterId {
+                version,
+                origin: self.id.origin.clone(),
+                timestamp,
+            },
+            consumers: HashMap::new(),
+            grants: HashMap::new(),
+            shards,
         };
 
-        if let Some(shards) = change.shards {
-            next.shards = decode_shards(shards.shards)?;
-            // Grants on shards no longer present should be dropped.
-            let valid: std::collections::HashSet<&Shard> = next.shards.iter().collect();
-            let drop_ids: Vec<GrantId> = next
-                .grants
-                .iter()
-                .filter(|(_, g)| !valid.contains(&g.shard))
-                .map(|(id, _)| id.clone())
-                .collect();
-            for id in drop_ids {
-                drop_grant(&mut next, &id);
-            }
-        }
-
+        // Coordinator assignments and updates take precedence over retained grants.
         if let Some(assign) = change.assign {
             for a in assign.assignments {
                 apply_assignment(&mut next, a)?;
             }
         }
-
         if let Some(update) = change.update {
             for g in update.grants {
-                update_grant(&mut next, g)?;
-            }
-        }
-
-        if let Some(unassign) = change.unassign {
-            for gid in unassign.grants {
-                drop_grant(&mut next, &GrantId(gid));
-            }
-        }
-
-        if let Some(remove) = change.remove {
-            for cid in remove.consumers {
-                match InstanceId::try_from(cid.as_str()) {
-                    Ok(id) => remove_consumer(&mut next, &id),
-                    Err(e) => {
-                        tracing::warn!(%cid, error = %e, "ignoring invalid consumer id in Remove");
+                let gid = GrantId(g.id.clone());
+                if let Some(old) = self.grants.get(&gid) {
+                    let mut grant = old.clone();
+                    if let Some(shard) = g.shard {
+                        grant.shard = Shard::try_from(shard)?;
                     }
+                    grant.state = grant_state_from_i32(g.state);
+                    insert_grant(&mut next, grant, &self.consumers[&old.consumer].consumer);
                 }
             }
         }
+        let unassigned: HashSet<_> = change
+            .unassign
+            .into_iter()
+            .flat_map(|u| u.grants)
+            .map(GrantId)
+            .collect();
+        let mut removed = HashSet::new();
+        for cid in change.remove.into_iter().flat_map(|r| r.consumers) {
+            match InstanceId::try_from(cid.as_str()) {
+                Ok(id) => {
+                    removed.insert(id);
+                }
+                Err(e) => {
+                    tracing::warn!(%cid, error = %e, "ignoring invalid consumer id in Remove")
+                }
+            }
+        }
+
+        // Changes preserve consumers without grants; snapshots discard omitted ones.
+        for (cid, entry) in &self.consumers {
+            if !removed.contains(cid) {
+                next.consumers.entry(*cid).or_insert_with(|| ConsumerEntry {
+                    consumer: entry.consumer.clone(),
+                    grants: Vec::new(),
+                });
+            }
+        }
+        retain_grants(&mut next, self, &unassigned, &removed);
 
         Ok(next)
     }
@@ -176,10 +190,10 @@ impl ClusterMap {
 }
 
 fn apply_snapshot(
+    previous: &ClusterMap,
     snap: cluster_message::Snapshot,
     version: i64,
     timestamp: SystemTime,
-    _cluster_origin_id: String,
 ) -> Result<ClusterMap, ClientError> {
     let shards = decode_shards(snap.shards)?;
     let origin = snap.origin.map(Instance::try_from).transpose()?;
@@ -196,6 +210,7 @@ fn apply_snapshot(
     for a in snap.assignments {
         apply_assignment(&mut out, a)?;
     }
+    retain_grants(&mut out, previous, &HashSet::new(), &HashSet::new());
     Ok(out)
 }
 
@@ -209,57 +224,99 @@ fn apply_assignment(
     let consumer = Instance::try_from(consumer_pb)?;
     let cid = consumer.id;
 
-    let entry = map.consumers.entry(cid).or_insert_with(|| ConsumerEntry {
-        consumer,
-        grants: Vec::new(),
-    });
+    // Refresh endpoint metadata even when this consumer was retained from a snapshot.
+    map.consumers
+        .entry(cid)
+        .and_modify(|entry| entry.consumer = consumer.clone())
+        .or_insert_with(|| ConsumerEntry {
+            consumer: consumer.clone(),
+            grants: Vec::new(),
+        });
 
     for g in assign.grants {
-        let gid = GrantId(g.id.clone());
         let shard = g
             .shard
             .ok_or_else(|| ClientError::InvalidMessage("GrantInfo without shard".into()))?;
-        let shard = Shard::try_from(shard)?;
-        let state = grant_state_from_i32(g.state);
-        entry.grants.push(gid.clone());
-        map.grants.insert(
-            gid.clone(),
+        insert_grant(
+            map,
             GrantEntry {
-                id: gid,
-                shard,
-                state,
+                id: GrantId(g.id),
+                shard: Shard::try_from(shard)?,
+                state: grant_state_from_i32(g.state),
                 consumer: cid,
             },
+            &consumer,
         );
     }
     Ok(())
 }
 
-fn update_grant(map: &mut ClusterMap, g: cluster_message::GrantInfo) -> Result<(), ClientError> {
-    let gid = GrantId(g.id.clone());
-    if let Some(entry) = map.grants.get_mut(&gid) {
-        if let Some(shard) = g.shard {
-            entry.shard = Shard::try_from(shard)?;
-        }
-        entry.state = grant_state_from_i32(g.state);
-    }
-    Ok(())
-}
-
-fn drop_grant(map: &mut ClusterMap, gid: &GrantId) {
-    if let Some(entry) = map.grants.remove(gid)
-        && let Some(c) = map.consumers.get_mut(&entry.consumer)
+fn insert_grant(map: &mut ClusterMap, grant: GrantEntry, consumer: &Instance) {
+    if let Some(old) = map.grants.remove(&grant.id)
+        && let Some(entry) = map.consumers.get_mut(&old.consumer)
     {
-        c.grants.retain(|g| g != gid);
+        entry.grants.retain(|id| id != &grant.id);
+    }
+    map.consumers
+        .entry(grant.consumer)
+        .or_insert_with(|| ConsumerEntry {
+            consumer: consumer.clone(),
+            grants: Vec::new(),
+        })
+        .grants
+        .push(grant.id.clone());
+    map.grants.insert(grant.id.clone(), grant);
+}
+
+fn retain_grants(
+    next: &mut ClusterMap,
+    previous: &ClusterMap,
+    unassigned: &HashSet<GrantId>,
+    removed: &HashSet<ConsumerId>,
+) {
+    let mut shard_states: HashMap<Shard, Vec<GrantState>> = next
+        .shards
+        .iter()
+        .cloned()
+        .map(|s| (s, Vec::new()))
+        .collect();
+    for grant in next.grants.values() {
+        shard_states
+            .entry(grant.shard.clone())
+            .or_default()
+            .push(grant.state);
+    }
+    for grant in previous.grants.values() {
+        if next.grants.contains_key(&grant.id)
+            || unassigned.contains(&grant.id)
+            || removed.contains(&grant.consumer)
+        {
+            continue;
+        }
+        let Some(states) = shard_states.get_mut(&grant.shard) else {
+            continue;
+        };
+        // A shard has either one grant or an allocated/revoked handover pair.
+        let compatible = match states.as_slice() {
+            [] => true,
+            [other] => grant_states_compatible(grant.state, *other),
+            _ => false,
+        };
+        if compatible {
+            states.push(grant.state);
+            insert_grant(
+                next,
+                grant.clone(),
+                &previous.consumers[&grant.consumer].consumer,
+            );
+        }
     }
 }
 
-fn remove_consumer(map: &mut ClusterMap, cid: &ConsumerId) {
-    if let Some(entry) = map.consumers.remove(cid) {
-        for gid in entry.grants {
-            map.grants.remove(&gid);
-        }
-    }
+fn grant_states_compatible(a: GrantState, b: GrantState) -> bool {
+    use GrantState::{Allocated, AllocatedLoaded, Revoked, RevokedUnloaded};
+    (matches!(a, Allocated | AllocatedLoaded) && matches!(b, Revoked | RevokedUnloaded))
+        || (matches!(b, Allocated | AllocatedLoaded) && matches!(a, Revoked | RevokedUnloaded))
 }
 
 fn decode_shards(raw: Vec<splitter_proto::pb::Shard>) -> Result<Vec<Shard>, ClientError> {

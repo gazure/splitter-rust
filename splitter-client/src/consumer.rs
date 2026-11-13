@@ -408,7 +408,7 @@ impl Driver {
         for grant in self.grants.values_mut() {
             grant.confirmed = false;
         }
-        self.cluster.send_replace(Arc::new(ClusterMap::empty()));
+        // Keep peer routes so partial restart snapshots can reconcile existing grants.
         let attempt = async {
             loop {
                 tokio::time::sleep(options.backoff).await;
