@@ -5,17 +5,18 @@
 //! authoritative and the client only needs to mirror the resulting view for
 //! lookups and consumer enumeration.
 
-use std::collections::HashMap;
-use std::time::SystemTime;
+use std::{collections::HashMap, time::SystemTime};
 
-use splitter_proto::pb::{cluster_message, ClusterMessage};
+use splitter_proto::pb::{ClusterMessage, cluster_message};
 
-use crate::error::ClientError;
-use crate::ids::{
-    ConsumerId, GrantId, GrantState, Instance, InstanceId, QualifiedDomainKey,
-    QualifiedDomainName, Shard,
+use crate::{
+    error::ClientError,
+    ids::{
+        ConsumerId, DomainType, GrantId, GrantState, Instance, InstanceId, QualifiedDomainKey,
+        QualifiedDomainName, Shard,
+    },
+    wrap::{grant_state_from_i32, timestamp_to_system_time},
 };
-use crate::wrap::{grant_state_from_i32, timestamp_to_system_time};
 
 #[derive(Clone, Debug)]
 pub struct ClusterId {
@@ -144,11 +145,7 @@ impl ClusterMap {
         Ok(next)
     }
 
-    pub fn lookup(
-        &self,
-        key: &QualifiedDomainKey,
-        states: &[GrantState],
-    ) -> Option<&GrantEntry> {
+    pub fn lookup(&self, key: &QualifiedDomainKey, states: &[GrantState]) -> Option<&GrantEntry> {
         let default_states = [
             GrantState::Active,
             GrantState::Revoked,
@@ -162,9 +159,11 @@ impl ClusterMap {
         };
 
         for state in wanted {
-            if let Some(g) = self.grants.values().find(|g| {
-                &g.state == state && shard_covers(&g.shard, key)
-            }) {
+            if let Some(g) = self
+                .grants
+                .values()
+                .find(|g| &g.state == state && shard_covers(&g.shard, key))
+            {
                 return Some(g);
             }
         }
@@ -210,13 +209,10 @@ fn apply_assignment(
     let consumer = Instance::try_from(consumer_pb)?;
     let cid = consumer.id;
 
-    let entry = map
-        .consumers
-        .entry(cid)
-        .or_insert_with(|| ConsumerEntry {
-            consumer,
-            grants: Vec::new(),
-        });
+    let entry = map.consumers.entry(cid).or_insert_with(|| ConsumerEntry {
+        consumer,
+        grants: Vec::new(),
+    });
 
     for g in assign.grants {
         let gid = GrantId(g.id.clone());
@@ -252,9 +248,10 @@ fn update_grant(map: &mut ClusterMap, g: cluster_message::GrantInfo) -> Result<(
 
 fn drop_grant(map: &mut ClusterMap, gid: &GrantId) {
     if let Some(entry) = map.grants.remove(gid)
-        && let Some(c) = map.consumers.get_mut(&entry.consumer) {
-            c.grants.retain(|g| g != gid);
-        }
+        && let Some(c) = map.consumers.get_mut(&entry.consumer)
+    {
+        c.grants.retain(|g| g != gid);
+    }
 }
 
 fn remove_consumer(map: &mut ClusterMap, cid: &ConsumerId) {
@@ -273,7 +270,10 @@ fn shard_covers(shard: &Shard, key: &QualifiedDomainKey) -> bool {
     if shard.domain != key.domain {
         return false;
     }
-    // UNIT shards cover the whole domain; REGIONAL must match region.
+    // UNIT shards cover the whole domain, regardless of serialized bounds or region.
+    if shard.kind == DomainType::Unit {
+        return true;
+    }
     if !shard.region.is_empty() && shard.region != key.key.region {
         return false;
     }
