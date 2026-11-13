@@ -41,16 +41,36 @@ pub struct ReconnectOptions {
 }
 
 /// User-facing options for `ConsumerClient::join`.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ConsumerOptions {
     pub key_names: Vec<DomainKeyName>,
     pub capacity_limit: u64,
+    /// Maximum duration of the initial Join RPC, including connection setup.
+    /// Defaults to 30 seconds. Must be nonzero.
+    pub join_timeout: Duration,
     /// If set, retry transient stream failures or session expiration and replay unexpired grants.
     /// Explicit session closure and permanent RPC errors remain terminal.
     pub reconnect: Option<ReconnectOptions>,
 }
 
+impl Default for ConsumerOptions {
+    fn default() -> Self {
+        Self {
+            key_names: Vec::new(),
+            capacity_limit: 0,
+            join_timeout: Duration::from_secs(30),
+            reconnect: None,
+        }
+    }
+}
+
 impl ConsumerOptions {
+    /// Sets the initial Join RPC timeout. Zero durations are rejected by `join`.
+    pub fn with_join_timeout(mut self, timeout: Duration) -> Self {
+        self.join_timeout = timeout;
+        self
+    }
+
     pub fn with_key_name(mut self, name: DomainKeyName) -> Self {
         self.key_names.push(name);
         self
@@ -166,22 +186,14 @@ impl ConsumerClient {
     }
 
     /// Starts a session for `consumer` and `service` with `opts`.
-    /// Returns connection errors or invalid reconnect settings before spawning the driver.
+    /// Returns connection errors, `JoinTimeout`, or invalid timeout settings before
+    /// spawning the driver. The initial session handshake has a separate deadline.
     pub async fn join(
         &self,
         consumer: Instance,
         service: QualifiedServiceName,
         opts: ConsumerOptions,
     ) -> Result<JoinHandle> {
-        if opts
-            .reconnect
-            .as_ref()
-            .is_some_and(|r| r.timeout.is_zero() || r.backoff.is_zero())
-        {
-            return Err(ClientError::InvalidMessage(
-                "reconnect durations must be nonzero".into(),
-            ));
-        }
         let inner = self.inner.clone();
         let options = opts.clone();
         let connector: Connector = Arc::new(move |active| {
@@ -193,12 +205,37 @@ impl ConsumerClient {
             );
             Box::pin(open_session(inner, consumer, service, opts, active))
         });
-        let transport = connector(Vec::new()).await?;
-        let (mut driver, mut handle) = Driver::new(transport);
-        driver.reconnect = opts.reconnect.map(|options| (options, connector));
-        handle.task = Some(tokio::spawn(driver.run()));
-        Ok(handle)
+        start_join(connector, opts).await
     }
+}
+
+async fn start_join(connector: Connector, opts: ConsumerOptions) -> Result<JoinHandle> {
+    if opts
+        .reconnect
+        .as_ref()
+        .is_some_and(|r| r.timeout.is_zero() || r.backoff.is_zero())
+    {
+        return Err(ClientError::InvalidMessage(
+            "reconnect durations must be nonzero".into(),
+        ));
+    }
+    if opts.join_timeout.is_zero() {
+        return Err(ClientError::InvalidMessage(
+            "Join timeout must be nonzero".into(),
+        ));
+    }
+    let deadline = tokio::time::Instant::now()
+        .checked_add(opts.join_timeout)
+        .ok_or_else(|| ClientError::InvalidMessage("Join timeout is too large".into()))?;
+    let transport = tokio::select! {
+        biased;
+        _ = tokio::time::sleep_until(deadline) => return Err(ClientError::JoinTimeout),
+        result = async { connector(Vec::new()).await } => result?,
+    };
+    let (mut driver, mut handle) = Driver::new(transport);
+    driver.reconnect = opts.reconnect.map(|options| (options, connector));
+    handle.task = Some(tokio::spawn(driver.run()));
+    Ok(handle)
 }
 
 async fn open_session(

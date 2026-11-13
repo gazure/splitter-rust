@@ -68,6 +68,13 @@ closed; storage-level fencing is still required for durable external writes.
 
 ## Session deadlines
 
+`ConsumerClient::join` bounds connection setup and the initial Join RPC response
+to 30 seconds by default. Set `ConsumerOptions::with_join_timeout(duration)` to
+change that budget. Zero or unrepresentable durations are rejected before an RPC
+starts. On timeout, the pending RPC is dropped, no driver is spawned, and the call
+returns `ClientError::JoinTimeout` (gRPC `DeadlineExceeded`). Initial connection
+failures return directly even when reconnect is enabled.
+
 After the initial Join RPC returns a stream, the driver allows 30 seconds for
 the first session TTL. Each `Established` or heartbeat acknowledgement replaces
 the deadline with the server's absolute expiration, converted to a monotonic
@@ -78,7 +85,7 @@ The deadline covers message handling and outbound sends, so a blocked send canno
 keep an expired session alive. Expiration triggers bounded reconnect when enabled.
 Without reconnect, or during graceful shutdown, the driver closes and expires its
 remaining grants. During reconnect, grants retain only their existing leases.
-An initial RPC that has not returned a stream still needs a caller-supplied timeout.
+The initial Join timeout does not limit the lifetime of an established session.
 
 ## Optional reconnect
 
@@ -149,7 +156,7 @@ undo effects that have already reached a peer.
 ## Compatibility and validation
 
 `Range` and `RangeFactory` signatures are unchanged. Direct `ConsumerOptions`
-struct literals need the new `reconnect` field, or `..Default::default()`.
+struct literals need the `reconnect` and `join_timeout` fields, or `..Default::default()`.
 Construct cluster maps with `ClusterMap::empty()` and `apply()`; private retention
 metadata prevents direct `ClusterMap` struct literals.
 Dropping a Join handle now cancels its driver, so retain the handle for the desired
