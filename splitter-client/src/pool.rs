@@ -69,16 +69,18 @@ impl ConnectionPool {
         &self.self_id
     }
 
-    /// Resolve a peer by instance id.
+    /// Resolves a peer by instance ID.
+    /// Returns `NoResolution` for this instance and retryable `Unavailable` for missing peers.
     pub fn resolve(&self, id: &InstanceId) -> Result<Channel, ClientError> {
         if id == &self.self_id {
             return Err(ClientError::NoResolution);
         }
         let entries = self.entries.read().expect("pool poisoned");
-        entries
-            .get(id)
-            .map(|e| e.channel.clone())
-            .ok_or(ClientError::NoResolution)
+        entries.get(id).map(|e| e.channel.clone()).ok_or_else(|| {
+            ClientError::Transport(tonic::Status::unavailable(
+                "peer is not available in the connection pool",
+            ))
+        })
     }
 
     /// Apply the current cluster membership: dial new peers, drop departed
@@ -208,11 +210,11 @@ mod tests {
     }
 
     #[test]
-    fn unknown_id_returns_no_resolution() {
+    fn unknown_id_returns_retryable_unavailable() {
         let pool = ConnectionPool::new(ME);
         assert!(matches!(
             pool.resolve(&OTHER),
-            Err(ClientError::NoResolution)
+            Err(ClientError::Transport(status)) if status.code() == tonic::Code::Unavailable
         ));
     }
 
@@ -246,7 +248,7 @@ mod tests {
         assert!(pool.resolve(&PEER_A).is_ok());
         assert!(matches!(
             pool.resolve(&PEER_B),
-            Err(ClientError::NoResolution)
+            Err(ClientError::Transport(status)) if status.code() == tonic::Code::Unavailable
         ));
     }
 
