@@ -2,8 +2,8 @@
 //!
 //! Reconciles partial snapshots and incremental changes using the grant retention
 //! rules in Go's `pkg/model/cluster.go`. Coordinator assignments take precedence
-//! over compatible grants retained from the previous view. Protocol validation
-//! of inbound snapshots and changes is not yet implemented.
+//! over compatible grants retained from the previous view. Invalid snapshots and
+//! changes are rejected without modifying the previous view.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -20,6 +20,8 @@ use crate::{
     },
     wrap::{grant_state_from_i32, timestamp_to_system_time},
 };
+
+mod validation;
 
 #[derive(Clone, Debug)]
 pub struct ClusterId {
@@ -48,6 +50,8 @@ pub struct ClusterMap {
     pub consumers: HashMap<ConsumerId, ConsumerEntry>,
     pub grants: HashMap<GrantId, GrantEntry>,
     pub shards: Vec<Shard>,
+    retained_grants: HashSet<GrantId>,
+    retained_consumers: HashSet<ConsumerId>,
 }
 
 impl ClusterMap {
@@ -61,12 +65,15 @@ impl ClusterMap {
             consumers: HashMap::new(),
             grants: HashMap::new(),
             shards: Vec::new(),
+            retained_grants: HashSet::new(),
+            retained_consumers: HashSet::new(),
         }
     }
 
     /// Apply a server-sent `ClusterMessage` to produce a new snapshot.
     /// Does not mutate `self`.
     pub fn apply(&self, msg: ClusterMessage) -> Result<Self, ClientError> {
+        self.validate(&msg)?;
         let timestamp = msg
             .timestamp
             .as_ref()
@@ -106,6 +113,8 @@ impl ClusterMap {
             consumers: HashMap::new(),
             grants: HashMap::new(),
             shards,
+            retained_grants: HashSet::new(),
+            retained_consumers: HashSet::new(),
         };
 
         // Coordinator assignments and updates take precedence over retained grants.
@@ -147,14 +156,20 @@ impl ClusterMap {
 
         // Changes preserve consumers without grants; snapshots discard omitted ones.
         for (cid, entry) in &self.consumers {
-            if !removed.contains(cid) {
-                next.consumers.entry(*cid).or_insert_with(|| ConsumerEntry {
-                    consumer: entry.consumer.clone(),
-                    grants: Vec::new(),
-                });
+            if !removed.contains(cid) && !next.consumers.contains_key(cid) {
+                next.consumers.insert(
+                    *cid,
+                    ConsumerEntry {
+                        consumer: entry.consumer.clone(),
+                        grants: Vec::new(),
+                    },
+                );
+                if self.retained_consumers.contains(cid) {
+                    next.retained_consumers.insert(*cid);
+                }
             }
         }
-        retain_grants(&mut next, self, &unassigned, &removed);
+        retain_grants(&mut next, self, &unassigned, &removed, false);
 
         Ok(next)
     }
@@ -206,11 +221,13 @@ fn apply_snapshot(
         consumers: HashMap::new(),
         grants: HashMap::new(),
         shards,
+        retained_grants: HashSet::new(),
+        retained_consumers: HashSet::new(),
     };
     for a in snap.assignments {
         apply_assignment(&mut out, a)?;
     }
-    retain_grants(&mut out, previous, &HashSet::new(), &HashSet::new());
+    retain_grants(&mut out, previous, &HashSet::new(), &HashSet::new(), true);
     Ok(out)
 }
 
@@ -273,6 +290,7 @@ fn retain_grants(
     previous: &ClusterMap,
     unassigned: &HashSet<GrantId>,
     removed: &HashSet<ConsumerId>,
+    snapshot: bool,
 ) {
     let mut shard_states: HashMap<Shard, Vec<GrantState>> = next
         .shards
@@ -304,6 +322,14 @@ fn retain_grants(
         };
         if compatible {
             states.push(grant.state);
+            if snapshot || previous.retained_grants.contains(&grant.id) {
+                next.retained_grants.insert(grant.id.clone());
+            }
+            if !next.consumers.contains_key(&grant.consumer)
+                && (snapshot || previous.retained_consumers.contains(&grant.consumer))
+            {
+                next.retained_consumers.insert(grant.consumer);
+            }
             insert_grant(
                 next,
                 grant.clone(),

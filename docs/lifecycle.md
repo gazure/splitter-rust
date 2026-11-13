@@ -116,9 +116,17 @@ retained grants, so activation removes a conflicting former owner. Snapshots dro
 omitted consumers without surviving grants; incremental changes keep consumers
 until explicitly removed. Terminal session closure clears the routing map.
 
+Cluster deltas must match the current coordinator and the next version. Invalid
+assignments, unknown updates, and invalid state transitions leave the previous map
+unchanged. Grants and consumers retained from an older snapshot must be reported
+by the current coordinator before they can be updated or explicitly removed.
+An invalid cluster message triggers recovery when enabled; the recovery timeout
+includes receiving a valid replacement snapshot. Without recovery, the session
+closes with `ClientError::InvalidCluster`. Deltas cannot resume before a snapshot.
+
 An outbound stream that remains blocked for five seconds terminates the session,
 unless the session deadline expires first and triggers recovery. Automatic
-recovery applies to inbound transient failures, EOF, and session expiration;
+recovery applies to inbound transient failures, EOF, session expiration, and invalid cluster updates;
 callers still need to supervise other terminal session failures.
 
 ## Request retry deadlines
@@ -137,6 +145,8 @@ undo effects that have already reached a peer.
 
 `Range` and `RangeFactory` signatures are unchanged. Direct `ConsumerOptions`
 struct literals need the new `reconnect` field, or `..Default::default()`.
+Construct cluster maps with `ClusterMap::empty()` and `apply()`; private retention
+metadata prevents direct `ClusterMap` struct literals.
 Dropping a Join handle now cancels its driver, so retain the handle for the desired
 session lifetime. The lockfile updates Tokio to 1.53.1 and `async-trait` to 0.1.92;
 the latter avoids a generated `double_must_use` lint on the installed nightly.
