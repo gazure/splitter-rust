@@ -119,5 +119,13 @@ cargo test -p splitter-client --all-targets --locked
 cargo +nightly clippy --workspace --all-targets --locked -- -D warnings
 ```
 
-Use the checked-in `rustfmt.toml` with nightly rustfmt. In-memory tests do not
-replace live-server validation or establish application-state durability.
+Use the checked-in `rustfmt.toml` with nightly rustfmt. The live tests in
+`splitter-client/tests/e2e.rs` are explicitly ignored by default and contain
+setup instructions. When selected with `--ignored`, missing configuration fails
+instead of silently passing. They include a two-consumer rebalance and shutdown
+scenario. In-memory tests do not replace that live-server validation or establish
+application-state durability.
+
+Run `python3 tools/live_splitter.py` to build and provision a disposable Docker
+server for the live suite. See [Live Splitter tests](live-testing.md) for
+requirements, diagnostics, and the limits of the single-node deployment.
