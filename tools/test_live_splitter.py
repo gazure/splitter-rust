@@ -54,6 +54,7 @@ class HarnessTests(unittest.TestCase):
         self.assertIsNone(error)
         command, options = next(call for call in calls if call[0][:2] == ["cargo", "test"])
         self.assertIn("--ignored", command)
+        self.assertIn("--lib", command)
         self.assertIn("--test-threads=1", command)
         self.assertEqual(options["env"]["SPLITTER_ENDPOINT"], "http://127.0.0.1:49152")
         self.assertEqual(options["env"]["SPLITTER_UNIT_SERVICE"], "rust-client/unit")

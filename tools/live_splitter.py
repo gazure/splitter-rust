@@ -114,7 +114,7 @@ def exercise(args):
             "SPLITTER_SHARDS": "4",
         }
         (artifacts / "environment.json").write_text(json.dumps(settings, indent=2) + "\n")
-        command = ["cargo", "test", "-p", "splitter-client", "--test", "e2e", "--locked"]
+        command = ["cargo", "test", "-p", "splitter-client", "--lib", "--test", "e2e", "--locked"]
         if args.offline:
             command.append("--offline")
         command.extend(["--", "--ignored", "--test-threads=1", "--nocapture"])

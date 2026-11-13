@@ -8,6 +8,8 @@ use tokio::time::timeout;
 mod cluster;
 mod deadline;
 mod initial_join;
+mod live_promotions;
+mod promotion;
 
 struct Harness {
     driver: Driver,
@@ -239,7 +241,7 @@ async fn promotion_refreshes_lease_and_active_load_does_not_regress_state() {
     let deadline = SystemTime::now() + Duration::from_secs(120);
     g.lease = Some(system_time_to_timestamp(deadline));
     g.state = pb::GrantState::Active as i32;
-    h.driver.on_promote(g);
+    h.driver.on_promote(g).await.unwrap();
     assert_eq!(o.expiration(), deadline);
     h.driver
         .on_action(GrantAction {

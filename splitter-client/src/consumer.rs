@@ -623,7 +623,7 @@ impl Driver {
             }
             client_message::Msg::Promote(p) => {
                 for g in p.grants {
-                    self.on_promote(g);
+                    self.on_promote(g).await?;
                 }
             }
             client_message::Msg::Revoke(r) => {
@@ -749,21 +749,30 @@ impl Driver {
         Ok(())
     }
 
-    fn on_promote(&mut self, g: pb::Grant) {
-        if let Some(entry) = self.grants.get_mut(&GrantId(g.id.clone())) {
-            if entry.revoked
-                || entry.ownership.expired.is_closed()
-                || SystemTime::now() >= entry.ownership.expiration()
-            {
-                return;
-            }
-            if let Some(expiration) = g.lease.as_ref().map(timestamp_to_system_time) {
-                entry.ownership.set_expiration(expiration);
-            }
-            entry.pb_grant = g;
-            entry.confirmed = true;
-            entry.ownership.activate();
+    async fn on_promote(&mut self, g: pb::Grant) -> Result<()> {
+        let id = GrantId(g.id.clone());
+        let candidate = self.grants.get_mut(&id).filter(|entry| {
+            entry.confirmed
+                && !entry.revoked
+                && !entry.ownership.expired.is_closed()
+                && SystemTime::now() < entry.ownership.expiration()
+                && matches!(
+                    grant_state_from_i32(entry.pb_grant.state),
+                    GrantState::Allocated | GrantState::AllocatedLoaded
+                )
+        });
+        let Some(entry) = candidate else {
+            // Stop local ownership before acknowledging the rejected promotion.
+            // Otherwise the coordinator can keep renewing a grant with no handler.
+            self.remove_grant(&id);
+            return self.send_released(g).await;
+        };
+        if let Some(expiration) = g.lease.as_ref().map(timestamp_to_system_time) {
+            entry.ownership.set_expiration(expiration);
         }
+        entry.pb_grant = g;
+        entry.ownership.activate();
+        Ok(())
     }
 
     async fn on_revoke(&mut self, mut g: pb::Grant) -> Result<()> {
