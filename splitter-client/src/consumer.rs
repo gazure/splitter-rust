@@ -303,6 +303,7 @@ struct Driver {
     closed: Latch,
     shutdown: Latch,
     grants: HashMap<GrantId, ActiveGrant>,
+    lease: Option<prost_types::Timestamp>,
     actions_tx: mpsc::UnboundedSender<GrantAction>,
     actions: mpsc::UnboundedReceiver<GrantAction>,
     reconnect: Option<(ReconnectOptions, Connector)>,
@@ -343,6 +344,7 @@ impl Driver {
                 closed,
                 shutdown,
                 grants: HashMap::new(),
+                lease: None,
                 actions_tx,
                 actions,
                 reconnect: None,
@@ -493,6 +495,7 @@ impl Driver {
 
     async fn reconnect(&mut self) -> Result<SystemTime> {
         let (options, connect) = self.reconnect.clone().expect("reconnect configured");
+        self.lease = None;
         for grant in self.grants.values_mut() {
             grant.confirmed = false;
         }
@@ -646,7 +649,7 @@ impl Driver {
         }
         Ok(())
     }
-    async fn on_assign(&mut self, g: pb::Grant) -> Result<()> {
+    async fn on_assign(&mut self, mut g: pb::Grant) -> Result<()> {
         let id = GrantId(g.id.clone());
         if self.shutdown.is_closed() {
             // A replay does not prove that the existing handler has stopped.
@@ -661,12 +664,32 @@ impl Driver {
                 "Assign without a valid shard".into(),
             ));
         };
+        let state = grant_state_from_i32(g.state);
+        if matches!(
+            state,
+            GrantState::Active | GrantState::Allocated | GrantState::AllocatedLoaded
+        ) && let Some(lease) = self.lease
+        {
+            // Active and allocated grants share the consumer lease. A replay's
+            // embedded deadline can predate the latest Extend message.
+            g.lease = Some(lease);
+        }
         let expiration = g
             .lease
             .as_ref()
             .map(timestamp_to_system_time)
             .ok_or_else(|| ClientError::InvalidMessage("Assign without a lease".into()))?;
-        let state = grant_state_from_i32(g.state);
+        if expiration <= SystemTime::now() {
+            // A stale replay must not relinquish a handler covered by a newer lease.
+            if self.grants.get(&id).is_some_and(|entry| {
+                !entry.ownership.expired.is_closed()
+                    && SystemTime::now() < entry.ownership.expiration()
+            }) {
+                return Ok(());
+            }
+            self.remove_grant(&id);
+            return Ok(());
+        }
         if let Some(entry) = self.grants.get_mut(&id) {
             // Replay must preserve application state, but cannot revive an expired
             // instance or reverse a terminal transition.
@@ -717,9 +740,6 @@ impl Driver {
             }
             self.remove_grant(&id);
         }
-        if expiration <= SystemTime::now() {
-            return Ok(());
-        }
         let ownership = Ownership::new(state, expiration);
         let watcher = spawn_grant_watcher(id.clone(), ownership.clone(), self.actions_tx.clone());
         self.grants.insert(
@@ -749,7 +769,7 @@ impl Driver {
         Ok(())
     }
 
-    async fn on_promote(&mut self, g: pb::Grant) -> Result<()> {
+    async fn on_promote(&mut self, mut g: pb::Grant) -> Result<()> {
         let id = GrantId(g.id.clone());
         let candidate = self.grants.get_mut(&id).filter(|entry| {
             entry.confirmed
@@ -767,6 +787,9 @@ impl Driver {
             self.remove_grant(&id);
             return self.send_released(g).await;
         };
+        if let Some(lease) = self.lease {
+            g.lease = Some(lease);
+        }
         if let Some(expiration) = g.lease.as_ref().map(timestamp_to_system_time) {
             entry.ownership.set_expiration(expiration);
         }
@@ -821,6 +844,7 @@ impl Driver {
         let Some(expiration) = e.lease.as_ref().map(timestamp_to_system_time) else {
             return;
         };
+        self.lease = e.lease;
         for entry in self.grants.values_mut() {
             if !entry.revoked
                 && entry.confirmed
