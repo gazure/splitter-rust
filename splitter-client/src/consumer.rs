@@ -45,7 +45,7 @@ pub struct ReconnectOptions {
 pub struct ConsumerOptions {
     pub key_names: Vec<DomainKeyName>,
     pub capacity_limit: u64,
-    /// If set, retry transient stream failures and replay unexpired grants.
+    /// If set, retry transient stream failures or session expiration and replay unexpired grants.
     /// Explicit session closure and permanent RPC errors remain terminal.
     pub reconnect: Option<ReconnectOptions>,
 }
@@ -147,6 +147,16 @@ struct Transport {
     inbound: Inbound,
 }
 type Connector = Arc<dyn Fn(Vec<pb::Grant>) -> BoxFuture<'static, Result<Transport>> + Send + Sync>;
+
+const SESSION_ESTABLISH_TIMEOUT: Duration = Duration::from_secs(30);
+
+enum SessionProgress {
+    Continue,
+    Renew(SystemTime),
+    Closed,
+    StreamEnded,
+    DeadlineElapsed,
+}
 
 impl ConsumerClient {
     pub fn new(channel: Channel) -> Self {
@@ -314,43 +324,83 @@ impl Driver {
 
     async fn run(mut self) -> Result<()> {
         let mut heartbeat = heartbeat_timer(None);
+        let mut deadline = tokio::time::Instant::now() + SESSION_ESTABLISH_TIMEOUT;
         let mut draining = false;
         loop {
-            if draining && self.grants.is_empty() {
-                self.send(session::closed_frame("client shutdown")).await?;
-                return Ok(());
-            }
-            tokio::select! {
+            // Include message handling and its outbound sends in the deadline.
+            // Checking only inbound.next() would let a blocked send mask expiry.
+            let progress = tokio::select! {
                 biased;
-                _ = self.shutdown.closed(), if !draining => {
-                    draining = true;
-                    self.send(wrap_client(client_message::Msg::Deregister(client_message::Deregister {}))).await?;
+                _ = tokio::time::sleep_until(deadline) => Ok(SessionProgress::DeadlineElapsed),
+                result = self.step(&mut heartbeat, &mut draining) => result,
+            };
+            let ttl = match progress {
+                Ok(SessionProgress::Continue) => continue,
+                Ok(SessionProgress::Closed) => return Ok(()),
+                Ok(SessionProgress::Renew(ttl)) => ttl,
+                Ok(SessionProgress::StreamEnded) => {
+                    self.recover(draining, ClientError::SessionClosed("stream ended".into()))
+                        .await?
                 }
-                Some(action) = self.actions.recv() => self.on_action(action).await?,
-                msg = self.transport.inbound.next() => {
-                    match msg {
-                        Some(Ok(join)) => {
-                            if let Some(ttl) = self.handle_inbound(join).await? {
-                                heartbeat = heartbeat_timer(Some(ttl));
-                            }
-                        }
-                        Some(Err(status)) => {
-                            if draining || !transient(&status) || self.reconnect.is_none() {
-                                return Err(ClientError::Transport(status));
-                            }
-                            heartbeat = heartbeat_timer(Some(self.reconnect().await?));
-                        }
-                        None => {
-                            if draining || self.reconnect.is_none() {
-                                return Err(ClientError::SessionClosed("stream ended".into()));
-                            }
-                            heartbeat = heartbeat_timer(Some(self.reconnect().await?));
+                Ok(SessionProgress::DeadlineElapsed) => {
+                    self.recover(
+                        draining,
+                        ClientError::SessionClosed("session deadline elapsed".into()),
+                    )
+                    .await?
+                }
+                Err(ClientError::Transport(status)) if transient(&status) => {
+                    self.recover(draining, ClientError::Transport(status))
+                        .await?
+                }
+                Err(error) => return Err(error),
+            };
+            // Convert the absolute server TTL once. A monotonic deadline also
+            // prevents a later wall-clock rollback from extending this session.
+            deadline = tokio::time::Instant::now()
+                + ttl.duration_since(SystemTime::now()).unwrap_or_default();
+            heartbeat = heartbeat_timer(Some(ttl));
+        }
+    }
+
+    async fn step(
+        &mut self,
+        heartbeat: &mut tokio::time::Interval,
+        draining: &mut bool,
+    ) -> Result<SessionProgress> {
+        if *draining && self.grants.is_empty() {
+            self.send(session::closed_frame("client shutdown")).await?;
+            return Ok(SessionProgress::Closed);
+        }
+        tokio::select! {
+            biased;
+            _ = self.shutdown.closed(), if !*draining => {
+                *draining = true;
+                self.send(wrap_client(client_message::Msg::Deregister(client_message::Deregister {}))).await?;
+            }
+            Some(action) = self.actions.recv() => self.on_action(action).await?,
+            msg = self.transport.inbound.next() => {
+                match msg {
+                    Some(Ok(join)) => {
+                        if let Some(ttl) = self.handle_inbound(join).await? {
+                            return Ok(SessionProgress::Renew(ttl));
                         }
                     }
+                    Some(Err(status)) => return Err(ClientError::Transport(status)),
+                    None => return Ok(SessionProgress::StreamEnded),
                 }
-                _ = heartbeat.tick() => self.send(session::heartbeat_frame()).await?,
             }
+            _ = heartbeat.tick() => self.send(session::heartbeat_frame()).await?,
         }
+        Ok(SessionProgress::Continue)
+    }
+
+    async fn recover(&mut self, draining: bool, error: ClientError) -> Result<SystemTime> {
+        if draining || self.shutdown.is_closed() || self.reconnect.is_none() {
+            return Err(error);
+        }
+        warn!(%error, "recovering consumer session");
+        self.reconnect().await
     }
 
     async fn reconnect(&mut self) -> Result<SystemTime> {
@@ -380,9 +430,14 @@ impl Driver {
                             Some(Ok(JoinMessage {
                                 msg: Some(join_message::Msg::Session(message)),
                             })) => match session::classify(&message) {
-                                Some(session::SessionEvent::Established { ttl }) => {
+                                Some(session::SessionEvent::Established { ttl })
+                                    if ttl > SystemTime::now() =>
+                                {
                                     return Ok((transport, ttl));
                                 }
+                                // A stale handshake is not recovery. Keep retrying
+                                // within the same disconnect episode's timeout.
+                                Some(session::SessionEvent::Established { .. }) => {}
                                 Some(session::SessionEvent::Closed { error }) => {
                                     return Err(ClientError::SessionClosed(error));
                                 }
