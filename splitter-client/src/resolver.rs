@@ -11,10 +11,12 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tonic::transport::Channel;
 
-use crate::cluster::ClusterMap;
-use crate::error::ClientError;
-use crate::ids::{GrantState, Location, QualifiedDomainKey, QualifiedDomainName};
-use crate::pool::ConnectionPool;
+use crate::{
+    cluster::ClusterMap,
+    error::ClientError,
+    ids::{GrantState, Location, QualifiedDomainKey, QualifiedDomainName},
+    pool::ConnectionPool,
+};
 
 /// Map a peer `Channel` into a user-defined gRPC client.
 pub type RemoteFn<C> = Arc<dyn Fn(Channel) -> C + Send + Sync>;

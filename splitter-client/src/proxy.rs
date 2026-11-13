@@ -17,14 +17,14 @@
 //! `handle_with_retry` wraps `handle` with [`crate::retry::retry_ownership`]
 //! so transient `NotOwned` / `Draining` / `Unavailable` failures are retried.
 
-use std::future::Future;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{future::Future, sync::Arc, time::Duration};
 
-use crate::cluster::ClusterMap;
-use crate::error::{ClientError, Result};
-use crate::ids::{GrantState, Location, QualifiedDomainKey};
-use crate::retry::{retry_ownership, OwnershipBackoff};
+use crate::{
+    cluster::ClusterMap,
+    error::{ClientError, Result},
+    ids::{GrantState, Location, QualifiedDomainKey},
+    retry::{OwnershipBackoff, retry_ownership},
+};
 
 /// Unified proxy over local + remote resolution for a domain.
 ///
@@ -85,6 +85,8 @@ where
 /// Retrying proxy routing. Uses [`OwnershipBackoff`] defaults (1s→5s) bounded
 /// by `timeout`. Retries on ownership-class errors
 /// (`NotOwned`/`Draining`/`Unavailable`); other errors short-circuit.
+/// The timeout includes local and remote attempts. Expiration during an attempt
+/// drops its future and returns [`ClientError::RetryTimeout`].
 ///
 /// Because the request must be retried on each attempt, `Req: Clone` and the
 /// closures are `Fn` (not `FnOnce`).
@@ -107,16 +109,23 @@ where
     let backoff = OwnershipBackoff::new(timeout);
     // &remote / &local each satisfy FnOnce via the blanket `&F: Fn` impl,
     // so one `handle` call per attempt consumes nothing of the outer closures.
-    retry_ownership(&backoff, || handle(proxy, key, req.clone(), &remote, &local)).await
+    retry_ownership(&backoff, || {
+        handle(proxy, key, req.clone(), &remote, &local)
+    })
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ids::{DomainKey, QualifiedDomainName, QualifiedServiceName};
-    use std::pin::Pin;
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::Mutex;
+    use std::{
+        pin::Pin,
+        sync::{
+            Mutex,
+            atomic::{AtomicU32, Ordering},
+        },
+    };
     use tonic::{Code, Status};
 
     type ResolveFn = Box<dyn FnMut() -> Result<&'static str> + Send>;
@@ -230,7 +239,9 @@ mod tests {
     #[tokio::test]
     async fn no_resolution_no_local_is_not_owned() {
         let p = MockProxy::new(|| Err(ClientError::NoResolution), |_| None);
-        let err = handle(&p, &7, 42, remote_ok(), local_ok()).await.unwrap_err();
+        let err = handle(&p, &7, 42, remote_ok(), local_ok())
+            .await
+            .unwrap_err();
         assert!(matches!(err, ClientError::NotOwned));
     }
 
@@ -238,9 +249,7 @@ mod tests {
     async fn remote_status_translates_to_client_error() {
         let p = MockProxy::new(|| Ok("peer-a"), |_| None);
         let remote = |_: &'static str, _: u32| {
-            Box::pin(async move {
-                Err::<String, _>(Status::new(Code::OutOfRange, "not owned"))
-            })
+            Box::pin(async move { Err::<String, _>(Status::new(Code::OutOfRange, "not owned")) })
         };
         let err = handle(&p, &7, 42, remote, local_ok()).await.unwrap_err();
         assert!(matches!(err, ClientError::NotOwned));
@@ -249,10 +258,17 @@ mod tests {
     #[tokio::test]
     async fn resolve_returning_unavailable_propagates() {
         let p = MockProxy::new(
-            || Err(ClientError::Transport(Status::new(Code::Unavailable, "down"))),
+            || {
+                Err(ClientError::Transport(Status::new(
+                    Code::Unavailable,
+                    "down",
+                )))
+            },
             |_| None,
         );
-        let err = handle(&p, &7, 42, remote_ok(), local_ok()).await.unwrap_err();
+        let err = handle(&p, &7, 42, remote_ok(), local_ok())
+            .await
+            .unwrap_err();
         assert!(matches!(err, ClientError::Transport(_)));
     }
 
@@ -274,7 +290,15 @@ mod tests {
         // NoResolution + no local value = NotOwned (ownership error → retried).
         tokio::time::pause();
         let task = tokio::spawn(async move {
-            handle_with_retry(&p, &7, Duration::from_secs(30), 42u32, remote_ok(), local_ok()).await
+            handle_with_retry(
+                &p,
+                &7,
+                Duration::from_secs(30),
+                42u32,
+                remote_ok(),
+                local_ok(),
+            )
+            .await
         });
         tokio::time::advance(Duration::from_secs(10)).await;
         let r = task.await.unwrap().unwrap();
@@ -293,9 +317,37 @@ mod tests {
             },
             |_| None,
         );
-        let r: Result<String> =
-            handle_with_retry(&p, &7, Duration::from_secs(1), 42u32, remote_ok(), local_ok()).await;
+        let r: Result<String> = handle_with_retry(
+            &p,
+            &7,
+            Duration::from_secs(1),
+            42u32,
+            remote_ok(),
+            local_ok(),
+        )
+        .await;
         assert!(matches!(r, Err(ClientError::InvalidMessage(_))));
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_timeout_bounds_a_pending_remote_call() {
+        let proxy = MockProxy::new(|| Ok("peer-a"), |_| None);
+        let started = tokio::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            handle_with_retry(
+                &proxy,
+                &7,
+                Duration::from_secs(1),
+                42u32,
+                |_, _| std::future::pending::<core::result::Result<String, Status>>(),
+                local_ok(),
+            ),
+        )
+        .await
+        .expect("remote call must respect the configured retry timeout");
+        assert!(matches!(result, Err(ClientError::RetryTimeout)));
+        assert_eq!(started.elapsed(), Duration::from_secs(1));
     }
 }

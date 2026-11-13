@@ -13,15 +13,19 @@
 //! the cluster we drop the channel, and tonic tears down the underlying
 //! connection on the last clone's drop.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, RwLock},
+};
 
 use tonic::transport::Channel;
 use tracing::warn;
 
-use crate::cluster::ClusterMap;
-use crate::error::ClientError;
-use crate::ids::{Endpoint, InstanceId};
+use crate::{
+    cluster::ClusterMap,
+    error::ClientError,
+    ids::{Endpoint, InstanceId},
+};
 
 struct PoolEntry {
     endpoint: Endpoint,
@@ -153,8 +157,10 @@ mod tests {
     use super::*;
     // We construct a minimal ClusterMap by hand; apply_cluster should dial /
     // evict correctly without needing a real gRPC server.
-    use crate::cluster::{ClusterId, ConsumerEntry};
-    use crate::ids::Location;
+    use crate::{
+        cluster::{ClusterId, ConsumerEntry},
+        ids::Location,
+    };
     use std::time::SystemTime;
 
     /// Deterministic test IDs from a u128 so we can refer to them by short

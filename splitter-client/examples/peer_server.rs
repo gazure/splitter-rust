@@ -11,14 +11,15 @@
 //! Usage:
 //!     cargo run --example peer_server -- <endpoint> <tenant/service> [peer_port] [region] [node]
 
-use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+    time::{Duration, SystemTime},
+};
 
-use splitter_client::processor::RecordingRange;
 use splitter_client::{
     DispatcherBuilder, GrantId, Instance, InstanceId, Location, Ownership, Processor,
-    QualifiedServiceName, RangeFactory, Shard,
+    QualifiedServiceName, RangeFactory, Shard, processor::RecordingRange,
 };
 use splitter_peer::PeerServerBuilder;
 use tonic::transport::{Channel, Server};

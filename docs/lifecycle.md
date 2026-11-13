@@ -112,6 +112,18 @@ unless the session deadline expires first and triggers recovery. Automatic
 recovery applies to inbound transient failures, EOF, and session expiration;
 callers still need to supervise other terminal session failures.
 
+## Request retry deadlines
+
+`retry_ownership` and `handle_with_retry` include both attempts and backoff in
+their timeout budget. If an in-flight attempt reaches the deadline, the helper
+drops its future and returns `ClientError::RetryTimeout`, which maps to gRPC
+`DeadlineExceeded`. A zero timeout returns that error without invoking the operation.
+If the budget expires during backoff, the helper returns the last ownership error
+without starting another attempt.
+
+Cancellation requires the operation to yield. Dropping an RPC future does not
+undo effects that have already reached a peer.
+
 ## Compatibility and validation
 
 `Range` and `RangeFactory` signatures are unchanged. Direct `ConsumerOptions`

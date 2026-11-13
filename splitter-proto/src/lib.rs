@@ -26,6 +26,7 @@ pub mod atoms {
     }
 }
 
-pub use atoms::splitter as pb;
-pub use atoms::splitter::lib::service::location as location_pb;
-pub use atoms::splitter::lib::service::service as session_pb;
+pub use atoms::{
+    splitter as pb,
+    splitter::lib::service::{location as location_pb, service as session_pb},
+};
