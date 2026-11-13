@@ -16,8 +16,10 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
+    time::Duration,
 };
 
+use tokio::time::Instant;
 use tonic::transport::Channel;
 use tracing::warn;
 
@@ -29,7 +31,33 @@ use crate::{
 
 struct PoolEntry {
     endpoint: Endpoint,
-    channel: Channel,
+    channel: Option<Channel>,
+    retry_at: Instant,
+}
+
+const DIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+impl PoolEntry {
+    fn new(endpoint: Endpoint) -> Self {
+        Self {
+            endpoint,
+            channel: None,
+            retry_at: Instant::now(),
+        }
+    }
+
+    fn try_dial(&mut self, dial: &DialFn) {
+        if self.channel.is_some() || Instant::now() < self.retry_at {
+            return;
+        }
+        match dial(&self.endpoint) {
+            Ok(channel) => self.channel = Some(channel),
+            Err(error) => {
+                self.retry_at = Instant::now() + DIAL_RETRY_DELAY;
+                warn!(peer = %self.endpoint, %error, "failed to construct peer channel; retry pending");
+            }
+        }
+    }
 }
 
 /// Dial configuration: accepts an [`Endpoint`] (host:port or full URL) and
@@ -54,6 +82,8 @@ impl ConnectionPool {
 
     /// Build a pool with a user-supplied dial function. Useful for TLS /
     /// custom interceptors; the default dials insecure HTTP/2.
+    /// The callback must be nonblocking and must not access this pool: it runs
+    /// under the pool's write lock to serialize channel construction.
     pub fn with_dial<F>(self_id: InstanceId, dial: F) -> Arc<Self>
     where
         F: Fn(&Endpoint) -> Result<Channel, ClientError> + Send + Sync + 'static,
@@ -71,73 +101,75 @@ impl ConnectionPool {
 
     /// Resolves a peer by instance ID.
     /// Returns `NoResolution` for this instance and retryable `Unavailable` for missing peers.
+    /// Retries failed channel construction after the one-second backoff, even
+    /// without another cluster update.
     pub fn resolve(&self, id: &InstanceId) -> Result<Channel, ClientError> {
         if id == &self.self_id {
             return Err(ClientError::NoResolution);
         }
-        let entries = self.entries.read().expect("pool poisoned");
-        entries.get(id).map(|e| e.channel.clone()).ok_or_else(|| {
-            ClientError::Transport(tonic::Status::unavailable(
-                "peer is not available in the connection pool",
-            ))
-        })
-    }
-
-    /// Apply the current cluster membership: dial new peers, drop departed
-    /// ones, rebuild channels whose advertised endpoint has changed.
-    pub fn apply_cluster(&self, cluster: &ClusterMap) {
-        let mut seen: HashSet<InstanceId> = HashSet::new();
-        let mut to_add: Vec<(InstanceId, Endpoint)> = Vec::new();
-        let mut to_rebuild: Vec<(InstanceId, Endpoint)> = Vec::new();
-
         {
             let entries = self.entries.read().expect("pool poisoned");
-            for consumer in cluster.consumers.values() {
-                let id = consumer.consumer.id;
-                if id == self.self_id {
-                    continue;
-                }
-                let endpoint = consumer.consumer.endpoint.clone();
-                if endpoint.is_empty() {
-                    continue; // peer didn't advertise a server; skip silently
-                }
-                seen.insert(id);
-                match entries.get(&id) {
-                    Some(existing) if existing.endpoint == endpoint => {}
-                    Some(_) => to_rebuild.push((id, endpoint)),
-                    None => to_add.push((id, endpoint)),
-                }
+            let entry = entries.get(id).ok_or_else(peer_unavailable)?;
+            if let Some(channel) = &entry.channel {
+                return Ok(channel.clone());
+            }
+            if Instant::now() < entry.retry_at {
+                return Err(peer_unavailable());
             }
         }
-
-        if to_add.is_empty() && to_rebuild.is_empty() {
-            // Still need to drop departed peers.
-            let mut entries = self.entries.write().expect("pool poisoned");
-            entries.retain(|id, _| seen.contains(id));
-            return;
-        }
-
+        // Recheck under the write lock: another caller can dial or replace the
+        // endpoint between the read and write, and departed peers stay removed.
         let mut entries = self.entries.write().expect("pool poisoned");
-        for (id, endpoint) in to_add.into_iter().chain(to_rebuild) {
-            match (self.dial)(&endpoint) {
-                Ok(channel) => {
-                    entries.insert(id, PoolEntry { endpoint, channel });
-                }
-                Err(e) => {
-                    warn!(peer = %endpoint, error = %e, "failed to dial peer, skipping");
-                }
+        let entry = entries.get_mut(id).ok_or_else(peer_unavailable)?;
+        entry.try_dial(self.dial.as_ref());
+        entry.channel.clone().ok_or_else(peer_unavailable)
+    }
+
+    /// Applies membership changes and attempts channel construction for new peers.
+    /// Endpoint changes discard the previous channel before dialing the new endpoint.
+    /// Failed construction is retried by later updates or lookups, at most once
+    /// per second for the same endpoint.
+    pub fn apply_cluster(&self, cluster: &ClusterMap) {
+        let mut seen = HashSet::new();
+        let mut entries = self.entries.write().expect("pool poisoned");
+        for consumer in cluster.consumers.values() {
+            let id = consumer.consumer.id;
+            let endpoint = &consumer.consumer.endpoint;
+            if id == self.self_id || endpoint.is_empty() {
+                continue;
             }
+            seen.insert(id);
+            let entry = entries
+                .entry(id)
+                .or_insert_with(|| PoolEntry::new(endpoint.clone()));
+            if entry.endpoint != *endpoint {
+                *entry = PoolEntry::new(endpoint.clone());
+            }
+            entry.try_dial(self.dial.as_ref());
         }
         entries.retain(|id, _| seen.contains(id));
     }
 
+    /// Returns the number of peers with constructed channels, excluding pending retries.
     pub fn len(&self) -> usize {
-        self.entries.read().expect("pool poisoned").len()
+        self.entries
+            .read()
+            .expect("pool poisoned")
+            .values()
+            .filter(|entry| entry.channel.is_some())
+            .count()
     }
 
+    /// Returns whether the pool has no constructed peer channels.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+fn peer_unavailable() -> ClientError {
+    ClientError::Transport(tonic::Status::unavailable(
+        "peer is not available in the connection pool",
+    ))
 }
 
 fn default_dial(endpoint: &Endpoint) -> Result<Channel, ClientError> {
@@ -157,6 +189,7 @@ fn normalize_endpoint(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod recovery;
     // We construct a minimal ClusterMap by hand; apply_cluster should dial /
     // evict correctly without needing a real gRPC server.
     use crate::{
