@@ -13,7 +13,7 @@ Go 1.26.2 to match the server's `go.mod`. The first build requires network acces
 for the Go image and dependencies. Cargo also downloads missing dependencies.
 
 The harness builds both `splitter` and `splitterctl` from the same source tree.
-It starts one Raft node with fast bootstrap and activation, temporary storage,
+It starts one Raft node with fast bootstrap, fast activation, eager assignment, temporary storage,
 and a unique container name. Docker assigns an available host port, bound to
 loopback. See Docker's [port publishing documentation](https://docs.docker.com/engine/network/port-publishing/).
 
@@ -49,7 +49,8 @@ python3 tools/live_splitter.py --image atoms.co/splitter:latest
 ```
 
 The existing image must provide `/usr/local/bin/splitter` and
-`/usr/local/bin/splitterctl` with the current server flags. The server repository's
+`/usr/local/bin/splitterctl` with the current server flags, including
+`--fast_activation` and `--eager_assignment`. The server repository's
 `bazel run //:load` target produces that image. No custom Testcontainers module
 is required for this harness; Docker lifecycle management lives in the runner.
 

@@ -99,7 +99,7 @@ def exercise(args):
             "--data_path=/data", "--raft_id=splitter",
             "--raft_server=splitter.test:50053", "--raft_join_peers=splitter.test:50052",
             "--splitter_server=splitter.test:50052",
-            "--fast_activation", "--raft_fast_bootstrap",
+            "--fast_activation", "--eager_assignment", "--raft_fast_bootstrap",
         ], timeout=120)
         wait_ready(container, args.startup_timeout)
         address = run(["docker", "port", container, "50051/tcp"]).stdout.strip()
