@@ -155,6 +155,12 @@ undo effects that have already reached a peer.
 
 ## Compatibility and validation
 
+`Processor::grants()` returns a cloneable `GrantMapReader` with `get`, `ids`,
+`len`, and `is_empty` methods. Readers observe the processor's live registry but
+cannot insert, transition, or remove its entries. Retrieved range handles keep
+their existing lifecycle responsibilities. Custom processors can still own a
+mutable `GrantMap`.
+
 `Range` and `RangeFactory` signatures are unchanged. Direct `ConsumerOptions`
 struct literals need the `reconnect` and `join_timeout` fields, or `..Default::default()`.
 Construct cluster maps with `ClusterMap::empty()` and `apply()`; private retention
