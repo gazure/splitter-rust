@@ -98,8 +98,7 @@ impl<T: Clone> GrantMap<T> {
     ///
     /// Panics if a previous writer poisoned the grant map lock.
     pub fn write(&self, id: GrantId, shard: Shard, state: GrantState, value: T) {
-        let mut m = self.inner.write().expect("grant map poisoned");
-        m.insert(
+        self.inner.write().expect("grant map poisoned").insert(
             id,
             Entry {
                 shard,
@@ -131,8 +130,11 @@ impl<T: Clone> GrantMap<T> {
     ///
     /// Panics if a previous writer poisoned the grant map lock.
     pub fn delete(&self, id: &GrantId) -> Option<(Shard, GrantState, T)> {
-        let mut m = self.inner.write().expect("grant map poisoned");
-        m.remove(id).map(|e| (e.shard, e.state, e.value))
+        self.inner
+            .write()
+            .expect("grant map poisoned")
+            .remove(id)
+            .map(|e| (e.shard, e.state, e.value))
     }
 
     /// Removes a grant only if `matches` accepts its current value.
@@ -163,8 +165,10 @@ impl<T: Clone> GrantMap<T> {
     ///
     /// Panics if a previous writer poisoned the grant map lock.
     pub fn get(&self, id: &GrantId) -> Option<(Shard, GrantState, T)> {
-        let m = self.inner.read().expect("grant map poisoned");
-        m.get(id)
+        self.inner
+            .read()
+            .expect("grant map poisoned")
+            .get(id)
             .map(|e| (e.shard.clone(), e.state, e.value.clone()))
     }
 
@@ -188,8 +192,12 @@ impl<T: Clone> GrantMap<T> {
     ///
     /// Panics if a previous writer poisoned the grant map lock.
     pub fn ids(&self) -> Vec<GrantId> {
-        let m = self.inner.read().expect("grant map poisoned");
-        m.keys().cloned().collect()
+        self.inner
+            .read()
+            .expect("grant map poisoned")
+            .keys()
+            .cloned()
+            .collect()
     }
 }
 

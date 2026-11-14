@@ -44,14 +44,14 @@ struct Env {
 }
 
 fn read_env() -> Env {
-    let endpoint =
-        std::env::var("SPLITTER_ENDPOINT").expect("set SPLITTER_ENDPOINT for live tests");
-    let service = QualifiedServiceName::parse(
-        &std::env::var("SPLITTER_SERVICE")
-            .expect("set SPLITTER_SERVICE to an isolated test service"),
-    )
-    .expect("SPLITTER_SERVICE must be tenant/service");
-    Env { endpoint, service }
+    Env {
+        endpoint: std::env::var("SPLITTER_ENDPOINT").expect("set SPLITTER_ENDPOINT for live tests"),
+        service: QualifiedServiceName::parse(
+            &std::env::var("SPLITTER_SERVICE")
+                .expect("set SPLITTER_SERVICE to an isolated test service"),
+        )
+        .expect("SPLITTER_SERVICE must be tenant/service"),
+    }
 }
 
 fn test_instance() -> Instance {
@@ -80,8 +80,7 @@ async fn connect(endpoint: &str) -> Channel {
 #[ignore = "requires an isolated live Splitter service; see module instructions"]
 async fn join_receives_initial_cluster_update() {
     let env = read_env();
-    let client = ConsumerClient::new(connect(&env.endpoint).await);
-    let handle = client
+    let handle = ConsumerClient::new(connect(&env.endpoint).await)
         .join(test_instance(), env.service, ConsumerOptions::default())
         .await
         .expect("join succeeds");
@@ -113,8 +112,7 @@ async fn join_receives_initial_cluster_update() {
 #[ignore = "requires an isolated live Splitter service; see module instructions"]
 async fn shutdown_closes_driver_cleanly() {
     let env = read_env();
-    let client = ConsumerClient::new(connect(&env.endpoint).await);
-    let handle = client
+    let handle = ConsumerClient::new(connect(&env.endpoint).await)
         .join(test_instance(), env.service, ConsumerOptions::default())
         .await
         .expect("join succeeds");
@@ -152,7 +150,11 @@ async fn join_returns_error_when_service_missing() {
         format!("does-not-exist-{}", uuid::Uuid::new_v4()),
     );
     let handle = client
-        .join(test_instance(), bogus, ConsumerOptions::default())
+        .join(
+            test_instance(),
+            bogus,
+            ConsumerOptions::default().without_reconnect(),
+        )
         .await
         .expect("Join establishes the stream before asynchronous registration rejection");
     tokio::time::timeout(Duration::from_secs(5), handle.closed().closed())
@@ -162,6 +164,34 @@ async fn join_returns_error_when_service_missing() {
         handle.shutdown().await.is_err(),
         "registration rejection is surfaced to the caller"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires a live Splitter endpoint; see module instructions"]
+async fn missing_service_retries_until_configured_disconnect_timeout() {
+    let env = read_env();
+    let client = ConsumerClient::new(connect(&env.endpoint).await);
+    let bogus = QualifiedServiceName::new(
+        env.service.tenant,
+        format!("does-not-exist-{}", uuid::Uuid::new_v4()),
+    );
+    let started = tokio::time::Instant::now();
+    let handle = client
+        .join(
+            test_instance(),
+            bogus,
+            ConsumerOptions::default().with_disconnect_timeout(Duration::from_secs(3)),
+        )
+        .await
+        .expect("consumer starts before registration succeeds");
+    tokio::time::timeout(Duration::from_secs(10), handle.closed().closed())
+        .await
+        .expect("disconnect timeout stops repeated registration attempts");
+    assert!(started.elapsed() >= Duration::from_secs(3));
+    assert!(matches!(
+        handle.shutdown().await,
+        Err(splitter_client::ClientError::DisconnectTimeout)
+    ));
 }
 
 struct TestFactory;

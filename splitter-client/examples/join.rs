@@ -42,8 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(%endpoint, %service, %region, %node, "connecting");
 
-    let channel = Channel::from_shared(endpoint.clone())?.connect().await?;
-    let client = ConsumerClient::new(channel);
+    let channel = Channel::from_shared(endpoint.clone())?.connect_lazy();
 
     let consumer = Instance {
         id: InstanceId::new(),
@@ -53,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         endpoint: splitter_client::Endpoint::default(),
     };
 
-    let handle = client
+    let handle = ConsumerClient::new(channel)
         .join(consumer, service, ConsumerOptions::default())
         .await?;
 

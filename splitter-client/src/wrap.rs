@@ -23,9 +23,7 @@ fn required<T>(value: Option<T>, field: &'static str) -> Result<T, ClientError> 
 }
 
 pub(crate) fn timestamp_to_system_time(ts: &Timestamp) -> SystemTime {
-    let secs = ts.seconds.max(0) as u64;
-    let nanos = ts.nanos.max(0) as u32;
-    UNIX_EPOCH + Duration::new(secs, nanos)
+    UNIX_EPOCH + Duration::new(ts.seconds.max(0) as u64, ts.nanos.max(0) as u32)
 }
 
 pub(crate) fn system_time_to_timestamp(t: SystemTime) -> Timestamp {
@@ -74,7 +72,7 @@ impl TryFrom<location_pb::Instance> for Instance {
         })?;
         Ok(Instance {
             id,
-            location: pb.location.map(Location::from).unwrap_or_default(),
+            location: pb.location.map_or_else(Location::default, Location::from),
             name: pb.name.into(),
             created: timestamp_to_system_time(&created),
             endpoint: Endpoint::default(),
@@ -85,8 +83,7 @@ impl TryFrom<location_pb::Instance> for Instance {
 impl TryFrom<pb::Instance> for Instance {
     type Error = ClientError;
     fn try_from(pb: pb::Instance) -> Result<Self, Self::Error> {
-        let inner = required(pb.instance, "Instance.instance")?;
-        let mut inst = Instance::try_from(inner)?;
+        let mut inst = Instance::try_from(required(pb.instance, "Instance.instance")?)?;
         inst.endpoint = pb.endpoint.into();
         Ok(inst)
     }
@@ -175,7 +172,7 @@ impl TryFrom<pb::QualifiedDomainKey> for QualifiedDomainKey {
     fn try_from(p: pb::QualifiedDomainKey) -> Result<Self, Self::Error> {
         Ok(QualifiedDomainKey {
             domain: required(p.domain, "QualifiedDomainKey.domain")?.try_into()?,
-            key: p.key.map(DomainKey::from).unwrap_or_default(),
+            key: p.key.map_or_else(DomainKey::default, DomainKey::from),
         })
     }
 }
@@ -286,10 +283,9 @@ impl TryFrom<pb::Shard> for Shard {
 
 impl From<Shard> for pb::Shard {
     fn from(s: Shard) -> Self {
-        let ty: pb::DomainType = s.kind.into();
         pb::Shard {
             domain: Some(s.domain.into()),
-            r#type: ty as i32,
+            r#type: pb::DomainType::from(s.kind) as i32,
             region: s.region.into_string(),
             from: s.from,
             to: s.to,

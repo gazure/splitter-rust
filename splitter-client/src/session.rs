@@ -85,7 +85,6 @@ fn wrap(req: session_pb::message::Request) -> JoinMessage {
 /// Returns a duration from `now`. Bounded to at least 250ms so the loop
 /// doesn't spin on a stale ttl, and at most 30s as a sanity ceiling.
 pub(crate) fn heartbeat_delay(ttl: SystemTime, now: SystemTime) -> Duration {
-    let remaining = ttl.duration_since(now).unwrap_or(Duration::ZERO);
-    let third = remaining / 3;
-    third.clamp(Duration::from_millis(250), Duration::from_secs(30))
+    (ttl.duration_since(now).unwrap_or_default() / 3)
+        .clamp(Duration::from_millis(250), Duration::from_secs(30))
 }

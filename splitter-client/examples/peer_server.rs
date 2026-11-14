@@ -19,7 +19,6 @@ mod recording_range;
 use recording_range::RecordingRange;
 
 use std::{
-    net::SocketAddr,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
@@ -73,13 +72,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node = args.next().unwrap_or_else(|| "local".to_string());
 
     // --- 1. Stand up the peer server first so we know its endpoint ---
-    let bind: SocketAddr = format!("127.0.0.1:{peer_port}").parse()?;
     let router = Server::builder().add_routes(tonic::service::Routes::default());
-    let peer = PeerServerBuilder::new(bind).serve(router).await?;
+    let peer = PeerServerBuilder::new(format!("127.0.0.1:{peer_port}").parse()?)
+        .serve(router)
+        .await?;
     tracing::info!(endpoint = %peer.endpoint, local = %peer.local_addr, "peer server up");
 
     // --- 2. Connect to the coordinator and build the Dispatcher ---
-    let channel = Channel::from_shared(endpoint.clone())?.connect().await?;
+    let channel = Channel::from_shared(endpoint.clone())?.connect_lazy();
     let instance = Instance {
         id: InstanceId::new(),
         location: Location::new(region, node),
@@ -89,21 +89,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let log = Arc::new(Mutex::new(Vec::new()));
-    let processor = Processor::new(Arc::new(LoggingFactory { log: log.clone() }));
     let dispatcher = DispatcherBuilder::new(service, instance)
-        .filter(processor.clone())
+        .filter(Processor::new(Arc::new(LoggingFactory {
+            log: log.clone(),
+        })))
         .build(channel)
         .await?;
 
     tracing::info!(id = %dispatcher.id(), "dispatcher online");
 
     // --- 3. Periodically flush lifecycle log ---
-    let log_printer = log.clone();
     let printer_task = tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            let mut buf = log_printer.lock().expect("log poisoned");
-            for line in buf.drain(..) {
+            for line in log.lock().expect("log poisoned").drain(..) {
                 tracing::info!(target: "range", "{line}");
             }
         }

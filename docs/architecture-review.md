@@ -107,13 +107,24 @@ caller problem or correctness invariant before choosing a refactor.
    Sources: [processor](../splitter-client/src/processor.rs) and
    [dispatcher](../splitter-client/src/dispatcher.rs).
 
-6. **Session readiness, termination reasons, and task supervision — review candidate.**
-   Joining a stream is different from completing registration and receiving
-   usable state. Define which readiness and failure information applications
-   need. Review task ownership, panic handling, and shutdown cancellation across
-   the session, dispatcher, and peer server. Consider typed status and terminal
-   results without requiring application workers to finish before hard close.
-   Zero assignments must remain a valid ready state. Sources:
+6. **Consumer lifetime — default reconnection implemented; broader supervision review open.**
+   The consumer owns an ongoing reconnect loop, following the Go client's
+   lifetime model. Session failures do not require an application restart loop.
+   Reconnection is enabled by default, including initial connection failures.
+   Controls bound each connection attempt, optionally bound continuous
+   disconnection, and bound graceful drain. Dropping the handle force-stops it.
+   Existing grants retain their current leases during outages, and local
+   completion does not require a coordinator acknowledgment. At hard expiry,
+   the processor closes the range and releases locally; graceful drain remains
+   bounded by the lease during revocation.
+   This change is on `fix/consumer-reconnect-default`. Validation passed 163
+   workspace tests and 15 doc tests, formatting, Clippy, and documentation builds.
+   The live registration retry test passes. Delayed promotion, two-consumer
+   handover, and final UNIT-consumer drain fail against the local coordinator
+   image; all three failures reproduce on the unchanged parent branch.
+   A returned handle is not a readiness signal. Broader readiness information,
+   panic handling, and peer-server supervision remain review candidates.
+   Zero assignments remain valid. Sources:
    [consumer](../splitter-client/src/consumer.rs),
    [dispatcher](../splitter-client/src/dispatcher.rs), and
    [peer crate](../splitter-peer).

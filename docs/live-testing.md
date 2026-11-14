@@ -25,8 +25,9 @@ port. The harness then creates these isolated fixtures:
 | `rust-client/ranges` | `entities`, GLOBAL, four shards | Join, shutdown, and two-consumer handover |
 | `rust-client/unit` | `leader`, UNIT | Routing and delayed promotion recovery |
 
-The six live tests run serially on the host against the published gRPC endpoint.
-They cover initial cluster delivery, missing-service rejection, shutdown,
+The seven live tests run serially on the host against the published gRPC endpoint.
+They cover initial cluster delivery, missing-service rejection with recovery
+disabled, registration retries up to a disconnect timeout, shutdown,
 two-consumer rebalance and drain, UNIT-domain lookup, and rejected promotions.
 Ordinary `cargo test` keeps these tests ignored; explicitly running them without
 configuration fails.

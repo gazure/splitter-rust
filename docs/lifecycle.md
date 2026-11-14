@@ -53,15 +53,17 @@ on both its active local path and local fallback path.
 
 ## Shutdown
 
-`JoinHandle::shutdown()` sends `Deregister`, continues processing handover and
-lease expiration, and closes the session after its grant table becomes empty.
-It can wait until lease expiration if direct consumer code never releases its
-grants. Use a timeout or `Dispatcher::drain(timeout)` to bound the wait.
+`JoinHandle::shutdown()` stops reconnecting and sends `Deregister` when connected.
+It continues processing handover and lease expiration until the grant table is
+empty. If disconnected, it revokes grants locally and waits for release or expiry
+without contacting the coordinator. `ConsumerOptions::with_drain_timeout(duration)`
+bounds both paths; the default is 30 seconds. Reaching that deadline force-closes
+remaining grants and returns `ClientError::DrainTimeout`.
 
 Dropping a `JoinHandle`, including cancellation of `shutdown()`, aborts the
-session driver. Driver cleanup expires every grant, clears the assignment and
-cluster snapshots, and closes the handle's completion signal. This also happens
-on server session closure, transport errors, and driver cancellation.
+session driver. Final driver cleanup expires every grant, clears the assignment
+and cluster snapshots, and closes the handle's completion signal. Ordinary
+session failures enter recovery instead of closing the consumer.
 
 `Dispatcher::drain(timeout)` waits for the session and its range tasks. On timeout,
 it cancels and joins remaining dispatcher work and returns
@@ -71,46 +73,69 @@ Cancellation is cooperative. Synchronous application code that blocks a runtime
 worker cannot be preempted by an async timeout. Ranges must stop side effects when
 closed; storage-level fencing is still required for durable external writes.
 
-## Session deadlines
+## Connection lifetime and termination
 
-`ConsumerClient::join` bounds connection setup and the initial Join RPC response
-to 30 seconds by default. Set `ConsumerOptions::with_join_timeout(duration)` to
-change that budget. Zero or unrepresentable durations are rejected before an RPC
-starts. On timeout, the pending RPC is dropped, no driver is spawned, and the call
-returns `ClientError::JoinTimeout` (gRPC `DeadlineExceeded`). Initial connection
-failures return directly even when reconnect is enabled.
+`ConsumerClient::join()` starts a background driver and returns its handle before
+connecting. The handle represents the consumer lifetime; it does not signal
+successful registration or readiness. The driver retries initial connection
+failures and subsequent session failures with a one-second backoff by default.
+RPC rejection, explicit server closure, malformed protocol messages, EOF,
+expired sessions, and failed or stalled outbound sends all return to that loop.
+Failures are logged; they do not require an application restart loop.
 
-After the initial Join RPC returns a stream, the driver allows 30 seconds for
-the first session TTL. Each `Established` or heartbeat acknowledgement replaces
-the deadline with the server's absolute expiration, converted to a monotonic
-timer when received. Acknowledgements can extend or shorten the deadline.
-Other inbound messages and outbound heartbeats do not renew it.
+To let the consumer connect when the coordinator starts later, construct the
+Tonic channel with `connect_lazy()`. An application's earlier call to
+`Channel::connect().await` can still fail before the consumer starts.
 
-The deadline covers message handling and outbound sends, so a blocked send cannot
-keep an expired session alive. Expiration triggers bounded reconnect when enabled.
-Without reconnect, or during graceful shutdown, the driver closes and expires its
-remaining grants. During reconnect, grants retain only their existing leases.
-The initial Join timeout does not limit the lifetime of an established session.
+Each connection attempt, including receipt of an unexpired `Established` frame,
+has a 30-second timeout by default. Set
+`ConsumerOptions::with_join_timeout(duration)` to change it. A timed-out attempt
+is dropped and retried. This timeout does not limit the consumer's lifetime.
+Zero or unrepresentable durations are rejected before the driver starts.
 
-## Optional reconnect
+Each `Established` or heartbeat acknowledgement replaces the session deadline
+with the server's absolute expiration, converted to a monotonic timer when
+received. Acknowledgements can extend or shorten the deadline. Other inbound
+messages and outbound heartbeats do not renew it. The deadline covers message
+handling and outbound sends, so a blocked send cannot keep an expired session
+alive. An outbound send also has its own five-second timeout.
 
-Reconnect is disabled by default. Enable bounded recovery for transient stream
-failures, EOF, or session expiration with these options:
+There is no continuous disconnect limit by default. To terminate after a long
+outage, configure a disconnect timeout and a drain timeout:
 
 ```rust
 use std::time::Duration;
-use splitter_client::{ConsumerOptions, ReconnectOptions};
+use splitter_client::ConsumerOptions;
 
-let options = ConsumerOptions::default().with_reconnect(ReconnectOptions {
-    timeout: Duration::from_secs(30),
-    backoff: Duration::from_secs(1),
-});
+let options = ConsumerOptions::default()
+    .with_disconnect_timeout(Duration::from_secs(60))
+    .with_drain_timeout(Duration::from_secs(10));
 ```
 
-The timeout includes connection attempts and the server's `Established` response.
-A silent, expired, or repeatedly failing establishment cannot reset the deadline. Shutdown
-interrupts recovery. Explicit session closure and permanent RPC errors remain
-terminal; an initial `join()` connection error still returns to its caller.
+The disconnect timer starts at initial connection or after losing a session.
+It includes backoff, connection attempts, and receipt of a valid cluster snapshot.
+A handshake or heartbeat alone does not reset it. A valid snapshot, including one
+with zero assignments, resets the timer for the next outage. Expiration stops
+retries, starts bounded local drain, and ultimately returns
+`ClientError::DisconnectTimeout`. The total bound is the disconnect timeout plus
+the drain timeout. Explicit shutdown and dropping the handle interrupt recovery.
+
+`ReconnectOptions` controls the retry backoff and optional disconnect `timeout`.
+Its default `timeout: None` retries indefinitely. To opt out of recovery entirely,
+use `ConsumerOptions::without_reconnect()`. In that mode, `join()` waits for the
+initial RPC response and returns connection errors or `ClientError::JoinTimeout`
+directly. After it returns a stream, session establishment has a separate
+30-second deadline. Subsequent session failures terminate the driver.
+
+## Assignment recovery
+
+Disconnection does not revoke existing grants or extend their leases. Application
+handlers can continue using ownership until its existing expiration. The driver
+continues processing local load, unload, release, and expiration signals while
+waiting to reconnect. Local completion does not depend on an outbound report to
+the coordinator. At the hard lease deadline, the processor closes the range and
+releases it locally. Graceful `Range::drain()` runs on revocation while lease time
+remains; expiry does not grant additional ownership time.
 
 Registration replays non-revoked grants whose leases remain valid. The existing
 range and ownership identity survive compatible reassignment. Unconfirmed grants
@@ -126,20 +151,16 @@ assignments. An allocated or loaded grant can coexist with a revoked or unloaded
 grant for the same shard. New assignments and state updates take precedence over
 retained grants, so activation removes a conflicting former owner. Snapshots drop
 omitted consumers without surviving grants; incremental changes keep consumers
-until explicitly removed. Terminal session closure clears the routing map.
+until explicitly removed. Final consumer termination clears the routing map.
+Local offline drain also clears stale routes.
 
 Cluster deltas must match the current coordinator and the next version. Invalid
 assignments, unknown updates, and invalid state transitions leave the previous map
 unchanged. Grants and consumers retained from an older snapshot must be reported
 by the current coordinator before they can be updated or explicitly removed.
-An invalid cluster message triggers recovery when enabled; the recovery timeout
+An invalid cluster message triggers recovery; the optional disconnect timeout
 includes receiving a valid replacement snapshot. Without recovery, the session
 closes with `ClientError::InvalidCluster`. Deltas cannot resume before a snapshot.
-
-An outbound stream that remains blocked for five seconds terminates the session,
-unless the session deadline expires first and triggers recovery. Automatic
-recovery applies to inbound transient failures, EOF, session expiration, and invalid cluster updates;
-callers still need to supervise other terminal session failures.
 
 ## Request retry deadlines
 
@@ -173,7 +194,9 @@ their existing lifecycle responsibilities. Custom processors can still own a
 mutable `GrantMap`.
 
 `Range` and `RangeFactory` signatures are unchanged. Direct `ConsumerOptions`
-struct literals need the `reconnect` and `join_timeout` fields, or `..Default::default()`.
+struct literals need `reconnect`, `join_timeout`, and `drain_timeout`, or
+`..Default::default()`. `ReconnectOptions::timeout` is now `Option<Duration>`:
+use `Some(duration)` for a disconnect limit or `None` for unlimited recovery.
 Construct cluster maps with `ClusterMap::empty()` and validated `apply()` updates.
 Read metadata and routing entries through `id()`, `consumers()`, `grants()`, and
 `shards()`. All snapshot fields are private, including retention metadata, so
