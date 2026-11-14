@@ -22,13 +22,13 @@ fn required<T>(value: Option<T>, field: &'static str) -> Result<T, ClientError> 
     value.ok_or_else(|| ClientError::InvalidMessage(format!("missing field: {field}")))
 }
 
-pub fn timestamp_to_system_time(ts: &Timestamp) -> SystemTime {
+pub(crate) fn timestamp_to_system_time(ts: &Timestamp) -> SystemTime {
     let secs = ts.seconds.max(0) as u64;
     let nanos = ts.nanos.max(0) as u32;
     UNIX_EPOCH + Duration::new(secs, nanos)
 }
 
-pub fn system_time_to_timestamp(t: SystemTime) -> Timestamp {
+pub(crate) fn system_time_to_timestamp(t: SystemTime) -> Timestamp {
     match t.duration_since(UNIX_EPOCH) {
         Ok(d) => Timestamp {
             seconds: d.as_secs() as i64,
@@ -41,7 +41,7 @@ pub fn system_time_to_timestamp(t: SystemTime) -> Timestamp {
     }
 }
 
-pub fn now_timestamp() -> Timestamp {
+pub(crate) fn now_timestamp() -> Timestamp {
     system_time_to_timestamp(SystemTime::now())
 }
 
@@ -263,7 +263,7 @@ impl From<GrantState> for pb::GrantState {
     }
 }
 
-pub fn grant_state_from_i32(v: i32) -> GrantState {
+pub(crate) fn grant_state_from_i32(v: i32) -> GrantState {
     pb::GrantState::try_from(v)
         .unwrap_or(pb::GrantState::Unknown)
         .into()

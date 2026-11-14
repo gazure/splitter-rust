@@ -23,6 +23,48 @@
 //! | `close()`          | fire a one-shot signal; does not block         |
 //! | `shutdown()`       | trigger graceful stop and await completion     |
 //! | `drain(timeout)`   | trigger graceful stop, bounded by the timeout  |
+//!
+//! # Wire conversions and API boundaries
+//!
+//! Convert between protocol messages and client types with `From` and `TryFrom`:
+//!
+//! ```
+//! use splitter_client::{DomainType, QualifiedDomainName, QualifiedServiceName, Shard};
+//! use splitter_proto::pb;
+//!
+//! let shard = Shard {
+//!     domain: QualifiedDomainName {
+//!         service: QualifiedServiceName::new("tenant", "service"),
+//!         name: "ranges".into(),
+//!     },
+//!     kind: DomainType::Global,
+//!     region: Default::default(),
+//!     from: "a".into(),
+//!     to: "z".into(),
+//! };
+//! let message: pb::Shard = shard.clone().into();
+//! assert_eq!(Shard::try_from(message).unwrap(), shard);
+//! ```
+//!
+//! Session framing and conversion helper modules are internal:
+//!
+//! ```compile_fail,E0603
+//! use splitter_client::session::heartbeat_frame;
+//! ```
+//!
+//! ```compile_fail,E0603
+//! use splitter_client::wrap::timestamp_to_system_time;
+//! ```
+//!
+//! Example and test fixtures are excluded from the library API:
+//!
+//! ```compile_fail,E0432
+//! use splitter_client::RecordingRange;
+//! ```
+//!
+//! ```compile_fail,E0432
+//! use splitter_client::processor::RecordingRange;
+//! ```
 
 // ClientError carries a tonic::Status which is ~176 bytes; boxing it would
 // complicate the #[from] conversions without real benefit. Results carrying
@@ -42,8 +84,8 @@ pub mod processor;
 pub mod proxy;
 pub mod resolver;
 pub mod retry;
-pub mod session;
-pub mod wrap;
+mod session;
+mod wrap;
 
 pub use cluster::{ClusterId, ClusterMap, ConsumerEntry, GrantEntry};
 pub use consumer::{
@@ -61,7 +103,14 @@ pub use ids::{
 pub use latch::{Latch, LatchReader};
 pub use ownership::{Loader, Ownership, Unloader};
 pub use pool::ConnectionPool;
-pub use processor::{Processor, Range, RangeFactory, RecordingRange};
+pub use processor::{Processor, Range, RangeFactory};
 pub use proxy::{Proxy, handle, handle_with_retry};
 pub use resolver::{DomainResolver, RemoteFn};
 pub use retry::{OwnershipBackoff, retry_ownership};
+
+#[cfg(test)]
+extern crate self as splitter_client;
+
+#[cfg(test)]
+#[path = "../support/recording_range.rs"]
+mod recording_range;

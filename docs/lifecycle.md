@@ -46,6 +46,11 @@ grant. `Processor` and `Dispatcher` do this automatically. `request_revoke()` ha
 a different purpose: it asks the coordinator to begin graceful handover while
 the handler continues to honor its existing lease.
 
+Closed ranges remain callable. Application request handlers must return
+`ClientError::NotOwned` when the range is closed, including calls through retained
+references after registry removal. The proxy delegates this check to the range
+on both its active local path and local fallback path.
+
 ## Shutdown
 
 `JoinHandle::shutdown()` sends `Deregister`, continues processing handover and
@@ -154,6 +159,12 @@ Cancellation requires the operation to yield. Dropping an RPC future does not
 undo effects that have already reached a peer.
 
 ## Compatibility and validation
+
+The `session` and `wrap` modules are internal. Use `From` and `TryFrom` to convert
+between protocol messages and client types. `RecordingRange` is shared source
+for the repository's examples and tests; neither `splitter_client::RecordingRange`
+nor `splitter_client::processor::RecordingRange` is exported. Applications
+implement `Range` for their own state.
 
 `Processor::grants()` returns a cloneable `GrantMapReader` with `get`, `ids`,
 `len`, and `is_empty` methods. Readers observe the processor's live registry but

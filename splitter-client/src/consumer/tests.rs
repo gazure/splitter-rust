@@ -441,7 +441,7 @@ async fn silent_reconnected_stream_does_not_reset_recovery_deadline() {
 async fn two_consumers_complete_unload_load_and_release_handover() {
     use crate::{
         ConnectionPool, DispatchFilter, FilterContext, InstanceId, Processor, RangeFactory,
-        RecordingRange,
+        recording_range::RecordingRange,
     };
     struct Factory {
         label: &'static str,

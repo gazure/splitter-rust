@@ -2,7 +2,8 @@
 //!
 //! These intentionally don't share structure with the generated `splitter-proto`
 //! types — they derive `Hash`/`Eq` cleanly, use rust-native time, and keep the
-//! public API free of prost dependencies. Conversions live in [`crate::wrap`].
+//! domain fields free of prost types. Use [`From`] and [`TryFrom`] to convert
+//! between domain values and protocol messages.
 //!
 //! ## Newtype string wrappers
 //!
