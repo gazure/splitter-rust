@@ -315,6 +315,9 @@ fn promotion_evicts_previously_confirmed_revoked_grant() {
     );
     assert_owner(&promoted, "a", &new, "new");
     assert_eq!(promoted.grants.len(), 1);
-    assert!(promoted.consumers[&old.id].grants.is_empty());
+    assert_eq!(
+        promoted.consumers[&old.id].grants,
+        [] as [splitter_client::GrantId; 0]
+    );
     assert_consistent(&promoted);
 }

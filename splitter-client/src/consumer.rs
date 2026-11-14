@@ -42,6 +42,7 @@ pub struct ReconnectOptions {
 
 /// User-facing options for `ConsumerClient::join`.
 #[derive(Clone, Debug)]
+#[must_use]
 pub struct ConsumerOptions {
     pub key_names: Vec<DomainKeyName>,
     pub capacity_limit: u64,
@@ -229,7 +230,7 @@ async fn start_join(connector: Connector, opts: ConsumerOptions) -> Result<JoinH
         .ok_or_else(|| ClientError::InvalidMessage("Join timeout is too large".into()))?;
     let transport = tokio::select! {
         biased;
-        _ = tokio::time::sleep_until(deadline) => return Err(ClientError::JoinTimeout),
+        () = tokio::time::sleep_until(deadline) => return Err(ClientError::JoinTimeout),
         result = async { connector(Vec::new()).await } => result?,
     };
     let (mut driver, mut handle) = Driver::new(transport);
@@ -372,7 +373,7 @@ impl Driver {
             // Checking only inbound.next() would let a blocked send mask expiry.
             let progress = tokio::select! {
                 biased;
-                _ = tokio::time::sleep_until(deadline) => Ok(SessionProgress::DeadlineElapsed),
+                () = tokio::time::sleep_until(deadline) => Ok(SessionProgress::DeadlineElapsed),
                 result = self.step(&mut heartbeat, &mut draining) => result,
             };
             let ttl = match progress {
@@ -418,7 +419,7 @@ impl Driver {
         }
         tokio::select! {
             biased;
-            _ = self.shutdown.closed(), if !*draining => {
+            () = self.shutdown.closed(), if !*draining => {
                 *draining = true;
                 self.send(wrap_client(client_message::Msg::Deregister(client_message::Deregister {}))).await?;
             }
@@ -487,7 +488,7 @@ impl Driver {
         };
         tokio::select! {
             biased;
-            _ = shutdown.closed() => Err(ClientError::Cancelled),
+            () = shutdown.closed() => Err(ClientError::Cancelled),
             result = tokio::time::timeout(budget, recovery) => result
                 .map_err(|_| ClientError::SessionClosed("cluster recovery timeout".into()))?,
         }
@@ -556,7 +557,7 @@ impl Driver {
         };
         let (transport, ttl) = tokio::select! {
             biased;
-            _ = self.shutdown.closed() => return Err(ClientError::SessionClosed("shutdown while disconnected".into())),
+            () = self.shutdown.closed() => return Err(ClientError::SessionClosed("shutdown while disconnected".into())),
             result = tokio::time::timeout(options.timeout, attempt) => {
                 result.map_err(|_| ClientError::SessionClosed("reconnect timed out".into()))??
             }
@@ -958,11 +959,11 @@ fn spawn_grant_watcher(
         loop {
             let action = tokio::select! {
                 biased;
-                _ = ownership.released.closed() => Action::Release,
-                _ = ownership.wait_for_expiration() => Action::Expired,
-                _ = ownership.loader.load.closed(), if !loaded => { loaded = true; Action::Load },
-                _ = ownership.unloader.unload.closed(), if !unloaded => { unloaded = true; Action::Unload },
-                _ = ownership.request_revoke_signal.closed(), if !requested => { requested = true; Action::Revoke },
+                () = ownership.released.closed() => Action::Release,
+                () = ownership.wait_for_expiration() => Action::Expired,
+                () = ownership.loader.load.closed(), if !loaded => { loaded = true; Action::Load },
+                () = ownership.unloader.unload.closed(), if !unloaded => { unloaded = true; Action::Unload },
+                () = ownership.request_revoke_signal.closed(), if !requested => { requested = true; Action::Revoke },
             };
             if actions
                 .send(GrantAction {

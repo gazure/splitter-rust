@@ -46,6 +46,7 @@ pub trait DispatchFilter: Send + Sync + 'static {
     async fn try_handle(&self, id: GrantId, shard: Shard, ownership: Arc<Ownership>) -> bool;
 }
 
+#[must_use]
 pub struct DispatcherBuilder {
     service: QualifiedServiceName,
     instance: Instance,
@@ -232,7 +233,7 @@ fn spawn_grants_router(
             }
             tokio::select! {
                 biased;
-                _ = force.closed() => break,
+                () = force.closed() => break,
                 changed = assignments.changed() => if changed.is_err() { break; },
                 result = tasks.join_next(), if !tasks.is_empty() => {
                     if let Some(Err(error)) = result { debug!(%error, "grant task exited"); }

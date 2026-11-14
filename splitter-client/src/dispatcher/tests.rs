@@ -36,7 +36,7 @@ fn assignment() -> GrantAssignment {
                 name: "domain".into(),
             },
             kind: DomainType::Global,
-            region: Default::default(),
+            region: crate::ids::Region::default(),
             from: String::new(),
             to: String::new(),
         },
@@ -124,10 +124,10 @@ async fn dispatcher_timeout_joins_range_tasks_and_reports_timeout() {
     count(&filter.started, 1).await;
     let id = Instance {
         id: crate::InstanceId::new(),
-        location: Default::default(),
+        location: crate::ids::Location::default(),
         name: "test".into(),
         created: SystemTime::now(),
-        endpoint: Default::default(),
+        endpoint: crate::ids::Endpoint::default(),
     };
     let (_, cluster) = watch::channel(Arc::new(ClusterMap::empty()));
     let dispatcher = Dispatcher {

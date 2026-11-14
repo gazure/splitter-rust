@@ -104,7 +104,7 @@ impl fmt::Debug for Ownership {
             .field("revoked", &self.revoked.is_closed())
             .field("expired", &self.expired.is_closed())
             .field("expiration", &self.expiration())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -185,9 +185,9 @@ impl Ownership {
             }
             tokio::select! {
                 biased;
-                _ = self.expired.closed() => return,
+                () = self.expired.closed() => return,
                 _ = deadline.changed() => {},
-                _ = tokio::time::sleep(remaining) => {},
+                () = tokio::time::sleep(remaining) => {},
             }
         }
     }
@@ -228,10 +228,10 @@ impl Ownership {
 
         tokio::select! {
             biased;
-            _ = self.wait_for_expiration() => Err(ClientError::Expired),
-            _ = revoked.closed() => Err(ClientError::Revoked),
-            _ = active.closed() => Ok(self.loader.clone()),
-            _ = unloaded.closed() => Ok(self.loader.clone()),
+            () = self.wait_for_expiration() => Err(ClientError::Expired),
+            () = revoked.closed() => Err(ClientError::Revoked),
+            () = active.closed() => Ok(self.loader.clone()),
+            () = unloaded.closed() => Ok(self.loader.clone()),
         }
     }
 
@@ -241,9 +241,9 @@ impl Ownership {
         let revoked = self.revoked.reader();
         tokio::select! {
             biased;
-            _ = self.wait_for_expiration() => Err(ClientError::Expired),
-            _ = revoked.closed() => Err(ClientError::Revoked),
-            _ = active.closed() => Ok(()),
+            () = self.wait_for_expiration() => Err(ClientError::Expired),
+            () = revoked.closed() => Err(ClientError::Revoked),
+            () = active.closed() => Ok(()),
         }
     }
 
@@ -253,8 +253,8 @@ impl Ownership {
         let revoked = self.revoked.reader();
         tokio::select! {
             biased;
-            _ = self.wait_for_expiration() => Err(ClientError::Expired),
-            _ = revoked.closed() => Ok(self.unloader.clone()),
+            () = self.wait_for_expiration() => Err(ClientError::Expired),
+            () = revoked.closed() => Ok(self.unloader.clone()),
         }
     }
 
@@ -263,8 +263,8 @@ impl Ownership {
         let loaded = self.unloader.loaded.reader();
         tokio::select! {
             biased;
-            _ = self.wait_for_expiration() => Err(ClientError::Expired),
-            _ = loaded.closed() => Ok(()),
+            () = self.wait_for_expiration() => Err(ClientError::Expired),
+            () = loaded.closed() => Ok(()),
         }
     }
 
@@ -273,8 +273,8 @@ impl Ownership {
     pub async fn wait_for_action(&self, action: LatchReader) -> Result<(), ClientError> {
         tokio::select! {
             biased;
-            _ = self.wait_for_expiration() => Err(ClientError::Expired),
-            _ = action.closed() => Ok(()),
+            () = self.wait_for_expiration() => Err(ClientError::Expired),
+            () = action.closed() => Ok(()),
         }
     }
 }

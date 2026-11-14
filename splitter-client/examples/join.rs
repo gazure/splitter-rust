@@ -50,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         location: Location::new(region, node),
         name: "splitter-rs/join-example".into(),
         created: SystemTime::now(),
-        endpoint: Default::default(),
+        endpoint: splitter_client::Endpoint::default(),
     };
 
     let handle = client
@@ -94,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             result = grants.changed() => if result.is_err() { break; },
             _ = tasks.join_next(), if !tasks.is_empty() => {},
-            _ = closed.closed() => {
+            () = closed.closed() => {
                 tracing::info!("join closed");
                 break;
             }

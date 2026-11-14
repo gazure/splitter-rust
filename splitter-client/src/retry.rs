@@ -51,7 +51,7 @@ where
         }
         let result = tokio::select! {
             biased;
-            _ = tokio::time::sleep_until(deadline) => return Err(ClientError::RetryTimeout),
+            () = tokio::time::sleep_until(deadline) => return Err(ClientError::RetryTimeout),
             result = async { op().await } => result,
         };
         let err = match result {

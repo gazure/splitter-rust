@@ -29,15 +29,15 @@ use crate::{
 };
 
 /// A user-supplied range-of-ownership. The `Range` governs whatever state
-/// lives behind a single assigned shard (e.g. a per-range HashMap of actors,
+/// lives behind a single assigned shard (for example, a per-range `HashMap` of actors,
 /// an in-memory cache, or a subscription to an external data feed).
 #[async_trait]
 pub trait Range: Send + Sync + 'static {
     /// Closes once the Range has finished initialization.
     fn initialized(&self) -> LatchReader;
 
-    /// Called when the grant is revoked. Returns a LatchReader that closes
-    /// once drain completes. The `timeout` is the remaining lease (after
+    /// Called when the grant is revoked. Returns a `LatchReader` that closes
+    /// after drain completes. The `timeout` is the remaining lease (after
     /// which the coordinator will hard-expire the grant anyway).
     async fn drain(&self, timeout: Duration) -> LatchReader;
 
@@ -88,9 +88,8 @@ impl<F: RangeFactory> DispatchFilter for Processor<F> {
 
     async fn try_handle(&self, id: GrantId, shard: Shard, ownership: Arc<Ownership>) -> bool {
         self.initialized.closed().await;
-        let loader = match ownership.wait_for_unload().await {
-            Ok(loader) => loader,
-            Err(_) => return true,
+        let Ok(loader) = ownership.wait_for_unload().await else {
+            return true;
         };
         let Some(range) = self
             .factory
@@ -129,8 +128,8 @@ impl<F: RangeFactory> Processor<F> {
         let closed = range.closed();
         tokio::select! {
             biased;
-            _ = closed.closed() => return,
-            _ = o.revoked.closed() => return,
+            () = closed.closed() => return,
+            () = o.revoked.closed() => return,
             res = o.wait_for_action(init) => {
                 if let Err(e) = res {
                     debug!(%id, error = %e, "step 2 init bail");
@@ -144,7 +143,7 @@ impl<F: RangeFactory> Processor<F> {
         // Step 3: Wait for activation.
         tokio::select! {
             biased;
-            _ = closed.closed() => return,
+            () = closed.closed() => return,
             result = o.wait_for_active() => if result.is_err() { return; },
         }
         self.grants
@@ -153,7 +152,7 @@ impl<F: RangeFactory> Processor<F> {
         // Step 4: Wait for revocation, then drain.
         let unloader = tokio::select! {
             biased;
-            _ = closed.closed() => return,
+            () = closed.closed() => return,
             result = o.wait_for_revoke() => match result {
                 Ok(unloader) => unloader,
                 Err(_) => return,
@@ -164,12 +163,12 @@ impl<F: RangeFactory> Processor<F> {
             .expiration()
             .duration_since(SystemTime::now())
             .unwrap_or(Duration::ZERO);
-        let unloaded = tokio::select! {
+        let drain_complete = tokio::select! {
             biased;
-            _ = closed.closed() => return,
-            _ = o.wait_for_expiration() => return,
+            () = closed.closed() => return,
+            () = o.wait_for_expiration() => return,
             result = tokio::time::timeout(timeout, range.drain(timeout)) => match result {
-                Ok(unloaded) => unloaded,
+                Ok(completed) => completed,
                 Err(_) => return,
             },
         };
@@ -178,15 +177,15 @@ impl<F: RangeFactory> Processor<F> {
         // counterpart load.
         tokio::select! {
             biased;
-            _ = closed.closed() => return,
-            result = o.wait_for_action(unloaded) => if result.is_err() { return; },
+            () = closed.closed() => return,
+            result = o.wait_for_action(drain_complete) => if result.is_err() { return; },
         }
         unloader.unload();
         self.grants
             .unloaded(id.clone(), shard.clone(), range.clone());
         tokio::select! {
             biased;
-            _ = closed.closed() => {},
+            () = closed.closed() => {},
             _ = o.wait_for_load() => {},
         }
     }
@@ -225,6 +224,11 @@ pub struct RecordingRange {
 }
 
 impl RecordingRange {
+    /// Creates a range that records initialization and drain events.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside a Tokio runtime.
     pub fn new(
         label: impl Into<String>,
         init_delay: Duration,
@@ -253,6 +257,11 @@ impl RecordingRange {
         }
     }
 
+    /// Appends a labeled message to the event log.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a previous writer poisoned the log mutex.
     pub fn log(&self, msg: &str) {
         self.log
             .lock()
@@ -332,7 +341,7 @@ mod tests {
                 name: "d".into(),
             },
             kind: DomainType::Global,
-            region: Default::default(),
+            region: crate::ids::Region::default(),
             from: String::new(),
             to: String::new(),
         }

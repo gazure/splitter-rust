@@ -53,6 +53,7 @@ impl PeerServerBuilder {
     /// bind address is `0.0.0.0` (or any wildcard), advertise the
     /// externally-reachable address here. Defaults to the resolved local
     /// address prefixed with `http://`.
+    #[must_use]
     pub fn advertise(mut self, endpoint: impl Into<String>) -> Self {
         self.advertised = Some(endpoint.into());
         self

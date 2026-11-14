@@ -77,8 +77,7 @@ impl ClusterMap {
         let timestamp = msg
             .timestamp
             .as_ref()
-            .map(timestamp_to_system_time)
-            .unwrap_or(SystemTime::UNIX_EPOCH);
+            .map_or(SystemTime::UNIX_EPOCH, timestamp_to_system_time);
         let version = msg.version;
 
         match msg.msg {
@@ -149,7 +148,7 @@ impl ClusterMap {
                     removed.insert(id);
                 }
                 Err(e) => {
-                    tracing::warn!(%cid, error = %e, "ignoring invalid consumer id in Remove")
+                    tracing::warn!(%cid, error = %e, "ignoring invalid consumer id in Remove");
                 }
             }
         }
