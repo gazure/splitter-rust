@@ -140,7 +140,7 @@ impl ConnectionPool {
     pub fn apply_cluster(&self, cluster: &ClusterMap) {
         let mut seen = HashSet::new();
         let mut entries = self.entries.write().expect("pool poisoned");
-        for consumer in cluster.consumers.values() {
+        for consumer in cluster.consumers().values() {
             let id = consumer.consumer.id;
             let endpoint = &consumer.consumer.endpoint;
             if id == self.self_id || endpoint.is_empty() {
@@ -202,12 +202,8 @@ fn normalize_endpoint(s: &str) -> String {
 mod tests {
     use super::*;
     mod recovery;
-    // We construct a minimal ClusterMap by hand; apply_cluster should dial /
-    // evict correctly without needing a real gRPC server.
-    use crate::{
-        cluster::{ClusterId, ConsumerEntry},
-        ids::Location,
-    };
+    use crate::ids::Location;
+    use splitter_proto::pb::{ClusterMessage, cluster_message};
     use std::time::SystemTime;
 
     /// Deterministic test IDs from a u128 so we can refer to them by short
@@ -228,24 +224,22 @@ mod tests {
     }
 
     fn mk_cluster(consumers: Vec<crate::ids::Instance>) -> ClusterMap {
-        let mut map = std::collections::HashMap::new();
-        for c in consumers {
-            map.insert(
-                c.id,
-                ConsumerEntry {
-                    consumer: c,
-                    grants: Vec::new(),
-                },
-            );
-        }
-        let mut cluster = ClusterMap::empty();
-        cluster.id = ClusterId {
-            version: 1,
-            origin: None,
-            timestamp: SystemTime::UNIX_EPOCH,
-        };
-        cluster.consumers = map;
-        cluster
+        ClusterMap::empty()
+            .apply(ClusterMessage {
+                version: 1,
+                msg: Some(cluster_message::Msg::Snapshot(cluster_message::Snapshot {
+                    assignments: consumers
+                        .into_iter()
+                        .map(|consumer| cluster_message::Assignment {
+                            consumer: Some(consumer.into()),
+                            grants: Vec::new(),
+                        })
+                        .collect(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })
+            .unwrap()
     }
 
     #[test]

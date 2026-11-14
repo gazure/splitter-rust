@@ -96,7 +96,12 @@ async fn live_delayed_promotion_releases_expired_grant() {
     assert!(!ownership.active().is_closed());
     ownership.loader().load();
     timeout(Duration::from_secs(5), async {
-        while !second.cluster.borrow_and_update().grants.contains_key(&id) {
+        while !second
+            .cluster
+            .borrow_and_update()
+            .grants()
+            .contains_key(&id)
+        {
             second.cluster.changed().await.unwrap();
         }
     })
@@ -129,7 +134,12 @@ async fn live_delayed_promotion_releases_expired_grant() {
     // Observe the actual coordinator's routing view, not only an outbound frame.
     timeout(Duration::from_secs(5), async {
         loop {
-            if !second.cluster.borrow_and_update().grants.contains_key(&id) {
+            if !second
+                .cluster
+                .borrow_and_update()
+                .grants()
+                .contains_key(&id)
+            {
                 break;
             }
             second.cluster.changed().await.unwrap();
@@ -141,7 +151,7 @@ async fn live_delayed_promotion_releases_expired_grant() {
         !second.closed().is_closed(),
         "session must remain connected"
     );
-    assert!(second.cluster.borrow().id.version > 0);
+    assert!(second.cluster.borrow().id().version > 0);
     assert!(!ownership.active().is_closed());
     println!("Coordinator removed rejected promotion {id:?}");
     timeout(Duration::from_secs(5), first.shutdown())

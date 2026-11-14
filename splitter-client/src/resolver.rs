@@ -61,7 +61,7 @@ impl<C> DomainResolver<C> {
         let cluster = self.cluster.borrow();
         cluster
             .lookup(key, &[])
-            .and_then(|g| cluster.consumers.get(&g.consumer))
+            .and_then(|g| cluster.consumers().get(&g.consumer))
             .map(|c| c.consumer.location.clone())
     }
 

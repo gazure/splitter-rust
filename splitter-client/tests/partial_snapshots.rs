@@ -57,7 +57,7 @@ fn snapshot(
     assignments: Vec<cm::Assignment>,
 ) -> ClusterMap {
     old.apply(ClusterMessage {
-        version: old.id.version + 1,
+        version: old.id().version + 1,
         msg: Some(cm::Msg::Snapshot(cm::Snapshot {
             shards: shards.to_vec(),
             origin: Some(consumer("coordinator").into()),
@@ -70,8 +70,8 @@ fn snapshot(
 
 fn change(old: &ClusterMap, change: cm::Change) -> ClusterMap {
     old.apply(ClusterMessage {
-        id: old.id.origin.as_ref().unwrap().id.to_string(),
-        version: old.id.version + 1,
+        id: old.id().origin.as_ref().unwrap().id.to_string(),
+        version: old.id().version + 1,
         msg: Some(cm::Msg::Change(change)),
         ..Default::default()
     })
@@ -97,13 +97,13 @@ fn assert_owner(map: &ClusterMap, key: &str, owner: &Instance, grant: &str) {
 
 fn assert_consistent(map: &ClusterMap) {
     let mut seen = std::collections::HashSet::new();
-    for (cid, consumer) in &map.consumers {
+    for (cid, consumer) in map.consumers() {
         for gid in &consumer.grants {
             assert!(seen.insert(gid), "duplicate consumer grant {gid}");
-            assert_eq!(&map.grants[gid].consumer, cid);
+            assert_eq!(&map.grants()[gid].consumer, cid);
         }
     }
-    assert_eq!(seen.len(), map.grants.len());
+    assert_eq!(seen.len(), map.grants().len());
 }
 
 // Mirrors Go's restart-snapshot-retains-peers fixture.
@@ -121,7 +121,7 @@ fn partial_restart_snapshot_retains_peer_routes_across_repeated_snapshots() {
     let partial = snapshot(&original, &shards, vec![assignments[0].clone()]);
     let empty = snapshot(&partial, &shards, vec![]);
     for map in [&original, &partial, &empty] {
-        assert_eq!(map.consumers.len(), 3);
+        assert_eq!(map.consumers().len(), 3);
         assert_owner(map, "b", &peers[1], "1");
         assert_owner(map, "e", &peers[2], "2");
         assert_consistent(map);
@@ -148,13 +148,13 @@ fn snapshots_drop_removed_shards_and_omitted_consumers_without_grants() {
         ],
     );
     let partial = snapshot(&original, &shards[..1], vec![]);
-    assert_eq!(partial.grants.len(), 1);
+    assert_eq!(partial.grants().len(), 1);
     assert_owner(&partial, "1", &owner, "a");
-    assert!(!partial.consumers.contains_key(&idle.id));
+    assert!(!partial.consumers().contains_key(&idle.id));
     let empty = snapshot(&partial, &[], vec![]);
-    assert!(empty.grants.is_empty());
-    assert!(empty.consumers.is_empty());
-    assert_eq!(original.grants.len(), 2);
+    assert!(empty.grants().is_empty());
+    assert!(empty.consumers().is_empty());
+    assert_eq!(original.grants().len(), 2);
 }
 
 #[test]
@@ -180,12 +180,12 @@ fn snapshot_retains_only_compatible_handover_states() {
                 || (matches!(new, Allocated | AllocatedLoaded)
                     && matches!(old, Revoked | RevokedUnloaded));
             assert_eq!(
-                next.grants.contains_key(&GrantId::new("old")),
+                next.grants().contains_key(&GrantId::new("old")),
                 compatible,
                 "{old:?} -> {new:?}"
             );
-            assert_eq!(next.consumers.contains_key(&old_owner.id), compatible);
-            assert!(next.grants.contains_key(&GrantId::new("new")));
+            assert_eq!(next.consumers().contains_key(&old_owner.id), compatible);
+            assert!(next.grants().contains_key(&GrantId::new("new")));
             assert_consistent(&next);
         }
     }
@@ -215,8 +215,8 @@ fn snapshot_replaces_same_grant_and_refreshes_consumer_metadata() {
             vec![grant("a", &shards[0], pb::GrantState::Allocated)],
         )],
     );
-    assert_eq!(next.grants.len(), 2);
-    assert_eq!(next.consumers[&owner.id].consumer, owner);
+    assert_eq!(next.grants().len(), 2);
+    assert_eq!(next.consumers()[&owner.id].consumer, owner);
     assert_owner(&next, "b", &owner, "b");
     assert_consistent(&next);
 }
@@ -240,7 +240,7 @@ fn replay_then_activation_evicts_retained_revoked_grant() {
         ],
     );
     let retained = snapshot(&original, &shards, vec![]);
-    assert_eq!(retained.grants.len(), 2);
+    assert_eq!(retained.grants().len(), 2);
     assert_consistent(&retained);
     let replay = change(
         &retained,
@@ -262,10 +262,10 @@ fn replay_then_activation_evicts_retained_revoked_grant() {
             ..Default::default()
         },
     );
-    assert_eq!(active.grants.len(), 1);
+    assert_eq!(active.grants().len(), 1);
     assert_owner(&active, "1", &new, "new");
     assert_eq!(
-        active.consumers[&old.id].grants,
+        active.consumers()[&old.id].grants,
         [] as [splitter_client::GrantId; 0]
     );
     assert_consistent(&active);
@@ -298,9 +298,9 @@ fn new_assignment_evicts_retained_owner_and_updates_endpoint() {
             ..Default::default()
         },
     );
-    assert_eq!(next.grants.len(), 1);
+    assert_eq!(next.grants().len(), 1);
     assert_owner(&next, "1", &owner, "new");
-    assert_eq!(next.consumers[&owner.id].consumer, owner);
+    assert_eq!(next.consumers()[&owner.id].consumer, owner);
     assert_consistent(&next);
 }
 
@@ -327,7 +327,7 @@ fn changes_remove_retained_grants_with_their_consumer_or_shard() {
             vec![grant("a", &shards[0], pb::GrantState::Active)],
         )],
     );
-    assert_eq!(partial.grants.len(), 2);
+    assert_eq!(partial.grants().len(), 2);
     let removed = change(
         &partial,
         cm::Change {
@@ -337,8 +337,8 @@ fn changes_remove_retained_grants_with_their_consumer_or_shard() {
             ..Default::default()
         },
     );
-    assert!(removed.consumers.is_empty());
-    assert!(removed.grants.is_empty());
+    assert!(removed.consumers().is_empty());
+    assert!(removed.grants().is_empty());
     let shrunk = change(
         &partial,
         cm::Change {
@@ -348,7 +348,7 @@ fn changes_remove_retained_grants_with_their_consumer_or_shard() {
             ..Default::default()
         },
     );
-    assert_eq!(shrunk.grants.len(), 1);
+    assert_eq!(shrunk.grants().len(), 1);
     assert_consistent(&shrunk);
 }
 
@@ -380,8 +380,8 @@ fn snapshot_replaces_handover_pair_and_moves_replayed_grant_to_reported_consumer
             vec![grant("allocated", &shards[0], pb::GrantState::Active)],
         )],
     );
-    assert_eq!(next.grants.len(), 1);
-    assert_eq!(next.consumers.len(), 1);
+    assert_eq!(next.grants().len(), 1);
+    assert_eq!(next.consumers().len(), 1);
     assert_owner(&next, "1", &new, "allocated");
     assert_consistent(&next);
 }
@@ -419,10 +419,10 @@ fn unassign_drops_reported_grant_but_preserves_omitted_peer_and_idle_consumer() 
             ..Default::default()
         },
     );
-    assert_eq!(next.grants.len(), 1);
+    assert_eq!(next.grants().len(), 1);
     assert_owner(&next, "b", &owner, "b");
     assert_eq!(
-        next.consumers[&idle.id].grants,
+        next.consumers()[&idle.id].grants,
         [] as [splitter_client::GrantId; 0]
     );
     assert_consistent(&next);
